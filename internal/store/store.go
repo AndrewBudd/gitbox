@@ -27,12 +27,21 @@ type Config struct {
 	GitHost  string `yaml:"git_host,omitempty"` // e.g. "github.com" or "git.corp.com"
 }
 
+// TrustAnchor records the root of the identity trust chain.
+// Created when the first identity is added. Immutable after that.
+type TrustAnchor struct {
+	RootUser       string    `yaml:"root_user"`
+	RootFingerprint string  `yaml:"root_fingerprint"` // fingerprint of the root's signing key
+	CreatedAt      time.Time `yaml:"created_at"`
+}
+
 // Identity represents a GitHub user's public keys cached locally.
 type Identity struct {
 	GitHubUser string                `yaml:"github_user"`
 	Keys       []StoredKey           `yaml:"keys"`
 	FetchedAt  time.Time             `yaml:"fetched_at"`
-	Source     string                `yaml:"source,omitempty"` // "github" or "manual"
+	Source     string                `yaml:"source,omitempty"`   // "github" or "manual"
+	SignedBy   string                `yaml:"signed_by,omitempty"` // username who signed, or "self" for root
 	Sig        *gitboxcrypto.Signature `yaml:"signature,omitempty"`
 }
 
@@ -90,6 +99,36 @@ type PaperKeyConfig struct {
 	Fingerprint string                 `yaml:"fingerprint"`
 	CreatedAt  time.Time               `yaml:"created_at"`
 	Sig        *gitboxcrypto.Signature `yaml:"signature,omitempty"`
+}
+
+// GetTrustAnchor loads the trust anchor if it exists.
+func (s *Store) GetTrustAnchor() (*TrustAnchor, error) {
+	path := filepath.Join(s.Root, "trust-anchor.yaml")
+	var ta TrustAnchor
+	if err := readYAML(path, &ta); err != nil {
+		return nil, err
+	}
+	return &ta, nil
+}
+
+// setTrustAnchor creates the trust anchor. Fails if one already exists.
+func (s *Store) setTrustAnchor(username string, signingKey interface{}) error {
+	path := filepath.Join(s.Root, "trust-anchor.yaml")
+	if _, err := os.Stat(path); err == nil {
+		return nil // Already exists, don't overwrite
+	}
+
+	fp, err := gitboxcrypto.FingerprintPrivateKey(signingKey)
+	if err != nil {
+		return fmt.Errorf("fingerprint signing key: %w", err)
+	}
+
+	ta := TrustAnchor{
+		RootUser:        username,
+		RootFingerprint: fp,
+		CreatedAt:       time.Now().UTC(),
+	}
+	return writeYAML(path, ta)
 }
 
 // GitHost returns the configured GitHub host for this store.
@@ -165,21 +204,28 @@ func (s *Store) AddUser(username string, signingKey interface{}) (*Identity, err
 
 	path := filepath.Join(s.Root, "identities", username+".yaml")
 
-	// Write first so the key is in the store for IdentifyKey
+	// Write unsigned first so the key is in the store for IdentifyKey
 	if err := writeYAML(path, id); err != nil {
 		return nil, err
 	}
 
-	// Now sign -- operator's key is findable (may be this user if adding yourself)
+	// Sign and set up trust chain
 	if signingKey != nil {
-		if _, err := s.IdentifyKey(signingKey); err == nil {
-			data, err := signableBytesForIdentity(*id)
+		signer, _ := s.IdentifyKey(signingKey)
+		if signer == username {
+			// Self-sign: this is the root of the trust chain
+			id.SignedBy = "self"
+			_ = s.setTrustAnchor(username, signingKey)
+		} else if signer != "" {
+			id.SignedBy = signer
+		}
+
+		if id.SignedBy != "" {
+			data, _ := signableBytesForIdentity(*id)
+			sig, err := gitboxcrypto.SignBytes(data, signingKey)
 			if err == nil {
-				sig, err := gitboxcrypto.SignBytes(data, signingKey)
-				if err == nil {
-					id.Sig = sig
-					_ = writeYAML(path, id)
-				}
+				id.Sig = sig
+				_ = writeYAML(path, id)
 			}
 		}
 	}
@@ -528,7 +574,8 @@ func (s *Store) RecoverIdentity(username string, newPubKeyLines string, paperKey
 		})
 	}
 
-	// Sign with the paper key
+	// Sign with the paper key (paper keys are a trust root)
+	id.SignedBy = username // paper key is owned by the same user
 	data, err := signableBytesForIdentity(*id)
 	if err != nil {
 		return nil, fmt.Errorf("marshal for signing: %w", err)
@@ -699,34 +746,29 @@ func (s *Store) AddManualUser(username string, pubKeyLines string, signingKey in
 		return nil, err
 	}
 
-	// Now sign: try operator's key first, fall back to self-signing during bootstrap
-	var signKey interface{}
+	// Sign and set up trust chain
 	if signingKey != nil {
-		if _, err := s.IdentifyKey(signingKey); err == nil {
-			signKey = signingKey
+		signer, _ := s.IdentifyKey(signingKey)
+		if signer == username {
+			id.SignedBy = "self"
+			_ = s.setTrustAnchor(username, signingKey)
+		} else if signer != "" {
+			id.SignedBy = signer
 		}
-	}
-	if signKey == nil {
-		// Bootstrap: self-sign (this identity's key is now in the store)
-		// The caller may have passed the new user's own private key as signingKey
-		if signingKey != nil {
-			if owner, err := s.IdentifyKey(signingKey); err == nil && owner == username {
-				signKey = signingKey
+
+		if id.SignedBy != "" {
+			data, err := signableBytesForIdentity(*id)
+			if err != nil {
+				return nil, fmt.Errorf("marshal for signing: %w", err)
 			}
-		}
-	}
-	if signKey != nil {
-		data, err := signableBytesForIdentity(*id)
-		if err != nil {
-			return nil, fmt.Errorf("marshal for signing: %w", err)
-		}
-		sig, err := gitboxcrypto.SignBytes(data, signKey)
-		if err != nil {
-			return nil, fmt.Errorf("sign identity: %w", err)
-		}
-		id.Sig = sig
-		if err := writeYAML(path, id); err != nil {
-			return nil, err
+			sig, err := gitboxcrypto.SignBytes(data, signingKey)
+			if err != nil {
+				return nil, fmt.Errorf("sign identity: %w", err)
+			}
+			id.Sig = sig
+			if err := writeYAML(path, id); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -774,14 +816,22 @@ func (s *Store) AddKeyToUser(username string, pubKeyLines string, operatorKey in
 
 	id.FetchedAt = time.Now().UTC()
 
-	// Re-sign the modified identity
+	// Re-sign the modified identity, preserving the chain
 	id.Sig = nil
 	if operatorKey != nil {
-		data, err := signableBytesForIdentity(*id)
-		if err == nil {
-			sig, err := gitboxcrypto.SignBytes(data, operatorKey)
+		signer, _ := s.IdentifyKey(operatorKey)
+		if signer != "" {
+			if signer == username {
+				id.SignedBy = "self"
+			} else {
+				id.SignedBy = signer
+			}
+			data, err := signableBytesForIdentity(*id)
 			if err == nil {
-				id.Sig = sig
+				sig, err := gitboxcrypto.SignBytes(data, operatorKey)
+				if err == nil {
+					id.Sig = sig
+				}
 			}
 		}
 	}
@@ -835,13 +885,21 @@ func (s *Store) RefreshUserKeys(username string, privKey interface{}) (*Identity
 		})
 	}
 
-	// Sign with operator's key -- this proves a known identity vouched for the GitHub fetch
+	// Sign with operator's key, recording who vouched for this refresh
 	if privKey != nil {
-		data, err := signableBytesForIdentity(*id)
-		if err == nil {
-			sig, err := gitboxcrypto.SignBytes(data, privKey)
+		signer, _ := s.IdentifyKey(privKey)
+		if signer == username {
+			id.SignedBy = "self"
+		} else if signer != "" {
+			id.SignedBy = signer
+		}
+		if id.SignedBy != "" {
+			data, err := signableBytesForIdentity(*id)
 			if err == nil {
-				id.Sig = sig
+				sig, err := gitboxcrypto.SignBytes(data, privKey)
+				if err == nil {
+					id.Sig = sig
+				}
 			}
 		}
 	}
@@ -1341,17 +1399,40 @@ func (s *Store) decryptDEK(manifest *SecretManifest, privKey interface{}) ([32]b
 func (s *Store) collectTrustedKeys() []string {
 	var keys []string
 
-	// SSH keys from identities
-	users, err := s.ListUsers()
-	if err == nil {
+	// Determine active users (recipients on at least one secret).
+	// During bootstrap (no secrets), all identities are trusted.
+	activeUsers := make(map[string]bool)
+	secrets, _ := s.ListSecrets()
+	if len(secrets) == 0 {
+		// Bootstrap: trust all identities
+		users, _ := s.ListUsers()
 		for _, u := range users {
-			id, err := s.GetUser(u)
-			if err != nil {
-				continue
+			activeUsers[u] = true
+		}
+	} else {
+		for _, secretName := range secrets {
+			recipients, _ := s.RecipientsForSecret(secretName)
+			for _, r := range recipients {
+				if !isPaperKeyRecipient(r) {
+					activeUsers[r] = true
+				}
 			}
-			for _, k := range id.Keys {
-				keys = append(keys, k.PublicKey)
-			}
+		}
+		// Also include the trust anchor root (even if revoked from all secrets,
+		// they may need to sign during re-rooting)
+		if ta, err := s.GetTrustAnchor(); err == nil {
+			activeUsers[ta.RootUser] = true
+		}
+	}
+
+	// SSH keys from active identities only
+	for u := range activeUsers {
+		id, err := s.GetUser(u)
+		if err != nil {
+			continue
+		}
+		for _, k := range id.Keys {
+			keys = append(keys, k.PublicKey)
 		}
 	}
 
@@ -1418,40 +1499,128 @@ func (s *Store) verifyPaperKey(pk *PaperKeyConfig) error {
 	return nil
 }
 
-// verifyIdentity checks that an identity is trustworthy before using its keys
-// for wrapping DEKs. This is critical -- a tampered identity could inject an
-// attacker's public key, and the next rebox would wrap secrets for it.
+// verifyIdentity checks that an identity is trustworthy by walking the
+// trust chain back to the trust anchor.
 //
-// Trust rules:
-//   - Signed identity: signature must verify against a known key or paper key.
-//   - Unsigned identity: accepted ONLY if it's the sole identity (bootstrap).
-//     After bootstrap, all identities must be signed.
-//   - The "source" field is informational only -- it's not trusted for verification
-//     since an attacker could set it to anything.
+// Chain: identity --[signed_by]--> signer --[signed_by]--> ... --> root (self-signed)
+// Root must match the trust anchor fingerprint.
 //
-// For the refresh-keys path, verification is skipped because the keys are
-// fetched directly from GitHub in the same operation (use verifyIdentitySkip).
+// An attacker who replaces identity files must forge the entire chain back to
+// the trust anchor, which they can't do without the root's private key.
 func (s *Store) verifyIdentity(id *Identity) error {
-	if id.Sig != nil {
-		// Has a signature -- verify it
+	return s.verifyIdentityChain(id, 0)
+}
+
+func (s *Store) verifyIdentityChain(id *Identity, depth int) error {
+	if depth > 20 {
+		return fmt.Errorf("identity %q: trust chain too deep (possible cycle)", id.GitHubUser)
+	}
+
+	// Must have a signature
+	if id.Sig == nil {
+		// Bootstrap exception: sole identity with no trust anchor yet
+		users, _ := s.ListUsers()
+		if len(users) <= 1 {
+			if _, err := s.GetTrustAnchor(); err != nil {
+				return nil // No trust anchor yet, this is the first identity
+			}
+		}
+		return fmt.Errorf("identity %q is unsigned", id.GitHubUser)
+	}
+
+	// Must have a signed_by field
+	if id.SignedBy == "" {
+		return fmt.Errorf("identity %q has signature but no signed_by field", id.GitHubUser)
+	}
+
+	if id.SignedBy == "self" {
+		// Self-signed root: verify signature against own keys and check trust anchor
+		var ownKeys []string
+		for _, k := range id.Keys {
+			ownKeys = append(ownKeys, k.PublicKey)
+		}
 		data, err := signableBytesForIdentity(*id)
 		if err != nil {
 			return err
 		}
-		trusted := s.collectTrustedKeys()
-		if err := gitboxcrypto.VerifySignature(data, id.Sig, trusted); err != nil {
-			return fmt.Errorf("identity %q: invalid signature: %w", id.GitHubUser, err)
+		if err := gitboxcrypto.VerifySignature(data, id.Sig, ownKeys); err != nil {
+			return fmt.Errorf("identity %q: self-signature invalid: %w", id.GitHubUser, err)
+		}
+
+		// Must match trust anchor
+		ta, err := s.GetTrustAnchor()
+		if err != nil {
+			return nil // No trust anchor yet (bootstrap)
+		}
+		if ta.RootUser != id.GitHubUser {
+			return fmt.Errorf("identity %q claims to be self-signed root but trust anchor says root is %q", id.GitHubUser, ta.RootUser)
+		}
+		// Verify at least one of this identity's key fingerprints matches the anchor
+		anchorMatch := false
+		for _, k := range id.Keys {
+			if k.Fingerprint == ta.RootFingerprint {
+				anchorMatch = true
+				break
+			}
+		}
+		if !anchorMatch {
+			return fmt.Errorf("identity %q: key fingerprint does not match trust anchor", id.GitHubUser)
 		}
 		return nil
 	}
 
-	// Unsigned: only accept during bootstrap (sole identity in the store)
-	users, _ := s.ListUsers()
-	if len(users) <= 1 {
-		return nil // Bootstrap: first identity, no one to sign it yet
+	// Signed by another identity or paper key: verify signature, then verify the signer
+	data, err := signableBytesForIdentity(*id)
+	if err != nil {
+		return err
 	}
 
-	return fmt.Errorf("identity %q is unsigned (all identities must be signed after initial setup)", id.GitHubUser)
+	// Collect signer's keys
+	var signerKeys []string
+
+	// Check if signed by a paper key (paper keys are trust roots too)
+	paperKeys, _ := s.listPaperKeysRaw()
+	for _, pk := range paperKeys {
+		if pk.Owner == id.SignedBy || pk.Name == id.SignedBy {
+			pubBytes, err := base64.StdEncoding.DecodeString(pk.PublicKey)
+			if err == nil && len(pubBytes) == 32 {
+				edPub := ed25519.PublicKey(pubBytes)
+				sshPub, err := ssh.NewPublicKey(edPub)
+				if err == nil {
+					signerKeys = append(signerKeys, string(ssh.MarshalAuthorizedKey(sshPub)))
+				}
+			}
+		}
+	}
+
+	// Check if signed by another identity (not self-referencing)
+	var signer *Identity
+	if id.SignedBy != id.GitHubUser {
+		s2, err := s.GetUser(id.SignedBy)
+		if err == nil {
+			signer = s2
+			for _, k := range signer.Keys {
+				signerKeys = append(signerKeys, k.PublicKey)
+			}
+		}
+	}
+	// If signed_by == own username (e.g. paper key recovery), paper keys are already collected above
+
+	if len(signerKeys) == 0 {
+		return fmt.Errorf("identity %q: signer %q not found", id.GitHubUser, id.SignedBy)
+	}
+
+	if err := gitboxcrypto.VerifySignature(data, id.Sig, signerKeys); err != nil {
+		return fmt.Errorf("identity %q: signature from %q invalid: %w", id.GitHubUser, id.SignedBy, err)
+	}
+
+	// If signed by another identity, walk the chain to the root
+	if signer != nil {
+		return s.verifyIdentityChain(signer, depth+1)
+	}
+
+	// Signed by a paper key (paper keys are trust roots, no further chain walk needed)
+	return nil
 }
 
 // verifyGroup checks that a group has a valid signature.

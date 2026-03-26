@@ -25,7 +25,11 @@ func setupTestStore(t *testing.T) (*Store, string) {
 	return s, dir
 }
 
-// addTestUser creates a fake identity with generated keys.
+// testFirstPrivKey stores the first test user's private key for signing subsequent users.
+var testFirstPrivKey interface{}
+var testFirstUser string
+
+// addTestUser creates a fake identity with generated keys, properly chained.
 func addTestUser(t *testing.T, s *Store, username string, keyType string) interface{} {
 	t.Helper()
 
@@ -68,18 +72,31 @@ func addTestUser(t *testing.T, s *Store, username string, keyType string) interf
 		}},
 	}
 
-	// Write first so the key is in the store for collectTrustedKeys
 	path := filepath.Join(s.Root, "identities", username+".yaml")
 	if err := writeYAML(path, id); err != nil {
 		t.Fatal(err)
 	}
 
-	// Self-sign (the key is now in the store, so it's a valid signer)
+	// First user: self-sign and set trust anchor
+	// Subsequent users: signed by the first user
+	users, _ := s.ListUsers()
+	var signKey interface{}
+	if len(users) <= 1 {
+		id.SignedBy = "self"
+		_ = s.setTrustAnchor(username, privKey)
+		signKey = privKey
+		testFirstPrivKey = privKey
+		testFirstUser = username
+	} else {
+		id.SignedBy = testFirstUser
+		signKey = testFirstPrivKey
+	}
+
 	data, err := signableBytesForIdentity(*id)
 	if err != nil {
 		t.Fatal(err)
 	}
-	sig, err := gitboxcrypto.SignBytes(data, privKey)
+	sig, err := gitboxcrypto.SignBytes(data, signKey)
 	if err != nil {
 		t.Fatal(err)
 	}
