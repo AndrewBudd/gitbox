@@ -56,7 +56,7 @@ echo "PASS: list"
 
 echo ""
 echo "--- Step 6: Decrypt with Ed25519 key ---"
-DECRYPTED=$($GITBOX decrypt prod-secrets -k "$WORKDIR/.ssh/id_ed25519")
+DECRYPTED=$($GITBOX decrypt prod-secrets -k "$WORKDIR/.ssh/id_ed25519" --stdout)
 ORIGINAL=$(cat secrets.env)
 if [ "$DECRYPTED" = "$ORIGINAL" ]; then
     echo "PASS: decrypt with ed25519 - content matches"
@@ -80,7 +80,7 @@ echo "PASS: grant"
 
 echo ""
 echo "--- Step 9: Bob can now decrypt with RSA key ---"
-BOB_DECRYPTED=$($GITBOX decrypt prod-secrets -k "$WORKDIR/.ssh/id_rsa")
+BOB_DECRYPTED=$($GITBOX decrypt prod-secrets -k "$WORKDIR/.ssh/id_rsa" --stdout)
 if [ "$BOB_DECRYPTED" = "$ORIGINAL" ]; then
     echo "PASS: bob decrypt with rsa - content matches"
 else
@@ -95,7 +95,7 @@ echo "PASS: revoke"
 
 echo ""
 echo "--- Step 11: Bob can no longer decrypt ---"
-if $GITBOX decrypt prod-secrets -k "$WORKDIR/.ssh/id_rsa" 2>/dev/null; then
+if $GITBOX decrypt prod-secrets -k "$WORKDIR/.ssh/id_rsa" --stdout 2>/dev/null; then
     echo "FAIL: bob should not be able to decrypt after revoke"
     exit 1
 else
@@ -104,7 +104,7 @@ fi
 
 echo ""
 echo "--- Step 12: Alice can still decrypt after revoke ---"
-ALICE_AFTER=$($GITBOX decrypt prod-secrets -k "$WORKDIR/.ssh/id_ed25519")
+ALICE_AFTER=$($GITBOX decrypt prod-secrets -k "$WORKDIR/.ssh/id_ed25519" --stdout)
 if [ "$ALICE_AFTER" = "$ORIGINAL" ]; then
     echo "PASS: alice can still decrypt after revoking bob"
 else
@@ -148,7 +148,7 @@ echo ""
 echo "--- Step 17: Multiple secrets ---"
 echo "REDIS_URL=redis://cache:6379" > cache.env
 $GITBOX encrypt cache.env -n cache-config -r alice,bob
-CACHE_DECRYPTED=$($GITBOX decrypt cache-config -k "$WORKDIR/.ssh/id_ed25519")
+CACHE_DECRYPTED=$($GITBOX decrypt cache-config -k "$WORKDIR/.ssh/id_ed25519" --stdout)
 if [ "$CACHE_DECRYPTED" = "$(cat cache.env)" ]; then
     echo "PASS: multi-recipient encrypt/decrypt"
 else

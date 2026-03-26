@@ -92,8 +92,8 @@ Group Commands:
 Secret Commands:
   encrypt <file> -n <name> [-r <recipients>] [--no-self]
                                Encrypt (you are auto-included as recipient)
-  decrypt <name> [-k <key>] [-o <file>]
-                               Decrypt a secret
+  decrypt <name> [output-file] [--stdout]
+                               Decrypt to file (default: <name>) or stdout
   grant <name> <user> [-k key] Grant access to a secret
   revoke <name> <user> [-k key] Revoke access (re-encrypts with new DEK)
   list                         List all secrets and their recipients
@@ -354,11 +354,13 @@ func cmdEncrypt(args []string) error {
 
 func cmdDecrypt(args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("usage: gitbox decrypt <name> [-k <key-path>] [-o <output-file>]")
+		return fmt.Errorf("usage: gitbox decrypt <name> [output-file] [--stdout]")
 	}
 
 	name := args[0]
 	var keyPath, outputPath string
+	toStdout := false
+
 	for i := 1; i < len(args); i++ {
 		switch args[i] {
 		case "-k", "--key":
@@ -371,7 +373,18 @@ func cmdDecrypt(args []string) error {
 				outputPath = args[i+1]
 				i++
 			}
+		case "--stdout", "-":
+			toStdout = true
+		default:
+			if !strings.HasPrefix(args[i], "-") {
+				outputPath = args[i]
+			}
 		}
+	}
+
+	// Default: write to <name> as filename (symmetric with encrypt reading a file)
+	if outputPath == "" && !toStdout {
+		outputPath = name
 	}
 
 	s, _, err := openStore()
@@ -389,13 +402,13 @@ func cmdDecrypt(args []string) error {
 		return err
 	}
 
-	if outputPath != "" {
+	if toStdout {
+		os.Stdout.Write(plaintext)
+	} else {
 		if err := os.WriteFile(outputPath, plaintext, 0600); err != nil {
 			return fmt.Errorf("write output: %w", err)
 		}
-		fmt.Printf("Decrypted %q to %s\n", name, outputPath)
-	} else {
-		os.Stdout.Write(plaintext)
+		fmt.Fprintf(os.Stderr, "Decrypted %q -> %s\n", name, outputPath)
 	}
 	return nil
 }

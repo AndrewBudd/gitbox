@@ -103,7 +103,7 @@ fi
 
 echo ""
 echo "--- Test 11: Decrypt with alice's key ---"
-DECRYPTED=$($GITBOX decrypt db-secret -k "$WORKDIR/alice_key")
+DECRYPTED=$($GITBOX decrypt db-secret -k "$WORKDIR/alice_key" --stdout)
 if [ "$DECRYPTED" = "DB_PASSWORD=hunter2" ]; then
     echo "PASS: alice can decrypt group secret"
 else
@@ -113,7 +113,7 @@ fi
 
 echo ""
 echo "--- Test 12: Decrypt with bob's key ---"
-DECRYPTED=$($GITBOX decrypt db-secret -k "$WORKDIR/bob_key")
+DECRYPTED=$($GITBOX decrypt db-secret -k "$WORKDIR/bob_key" --stdout)
 if [ "$DECRYPTED" = "DB_PASSWORD=hunter2" ]; then
     echo "PASS: bob can decrypt group secret"
 else
@@ -184,7 +184,7 @@ $GITBOX apply "$WORKDIR/apply-test.yaml" -k "$WORKDIR/alice_key"
 echo ""
 
 # Verify diana now has access to db-secret
-DIANA_DECRYPTED=$($GITBOX decrypt db-secret -k "$WORKDIR/diana_key")
+DIANA_DECRYPTED=$($GITBOX decrypt db-secret -k "$WORKDIR/diana_key" --stdout)
 if [ "$DIANA_DECRYPTED" = "DB_PASSWORD=hunter2" ]; then
     echo "PASS: apply granted diana access to db-secret"
 else
@@ -217,7 +217,7 @@ YAML
 $GITBOX apply "$WORKDIR/apply-new.yaml" -k "$WORKDIR/alice_key"
 echo ""
 
-NEW_DECRYPTED=$($GITBOX decrypt new-secret -k "$WORKDIR/alice_key")
+NEW_DECRYPTED=$($GITBOX decrypt new-secret -k "$WORKDIR/alice_key" --stdout)
 if [ "$NEW_DECRYPTED" = "NEW_SECRET=xyz789" ]; then
     echo "PASS: apply created new secret from file"
 else
@@ -256,7 +256,7 @@ echo "PASS: nested groups resolved correctly"
 
 # Verify everyone can decrypt
 for user in alice bob charlie diana; do
-    RESULT=$($GITBOX decrypt global-secret -k "$WORKDIR/${user}_key")
+    RESULT=$($GITBOX decrypt global-secret -k "$WORKDIR/${user}_key" --stdout)
     if [ "$RESULT" = "GLOBAL_SECRET=allhands" ]; then
         true
     else
