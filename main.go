@@ -90,8 +90,8 @@ Group Commands:
   group delete <name>                    Delete a group
 
 Secret Commands:
-  encrypt <file> -n <name> -r <recipients>
-                               Encrypt a file (recipients: users or @groups)
+  encrypt <file> -n <name> [-r <recipients>] [--no-self]
+                               Encrypt (you are auto-included as recipient)
   decrypt <name> [-k <key>] [-o <file>]
                                Decrypt a secret
   grant <name> <user> [-k key] Grant access to a secret
@@ -250,10 +250,11 @@ func cmdAddUser(args []string) error {
 
 func cmdEncrypt(args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("usage: gitbox encrypt <file> -n <name> -r <user1,user2,...>")
+		return fmt.Errorf("usage: gitbox encrypt <file> -n <name> -r <user1,user2,...> [--no-self]")
 	}
 
-	var filePath, name, recipientStr string
+	var filePath, name, recipientStr, keyPath string
+	noSelf := false
 	filePath = args[0]
 
 	for i := 1; i < len(args); i++ {
@@ -268,23 +269,20 @@ func cmdEncrypt(args []string) error {
 				recipientStr = args[i+1]
 				i++
 			}
+		case "-k", "--key":
+			if i+1 < len(args) {
+				keyPath = args[i+1]
+				i++
+			}
+		case "--no-self":
+			noSelf = true
 		}
 	}
 
 	if name == "" {
-		// Default name from filename without extension
 		name = strings.TrimSuffix(filepath.Base(filePath), filepath.Ext(filePath))
 	}
-	if recipientStr == "" {
-		return fmt.Errorf("recipients required: -r <user1,user2,...>")
-	}
 
-	recipients := strings.Split(recipientStr, ",")
-	for i := range recipients {
-		recipients[i] = strings.TrimSpace(recipients[i])
-	}
-
-	// Read plaintext file
 	plaintext, err := os.ReadFile(filePath)
 	if err != nil {
 		return fmt.Errorf("read file: %w", err)
@@ -293,6 +291,37 @@ func cmdEncrypt(args []string) error {
 	s, root, err := openStore()
 	if err != nil {
 		return err
+	}
+
+	// Parse explicit recipients
+	var recipients []string
+	if recipientStr != "" {
+		for _, r := range strings.Split(recipientStr, ",") {
+			recipients = append(recipients, strings.TrimSpace(r))
+		}
+	}
+
+	// Auto-include the operator unless --no-self
+	if !noSelf {
+		privKey, _ := loadPrivateKey(keyPath)
+		if privKey != nil {
+			if self, err := s.IdentifyKey(privKey); err == nil {
+				found := false
+				for _, r := range recipients {
+					if r == self {
+						found = true
+						break
+					}
+				}
+				if !found {
+					recipients = append(recipients, self)
+				}
+			}
+		}
+	}
+
+	if len(recipients) == 0 {
+		return fmt.Errorf("no recipients (specify with -r or ensure your SSH key matches a known identity)")
 	}
 
 	if err := s.EncryptSecret(name, plaintext, recipients); err != nil {
