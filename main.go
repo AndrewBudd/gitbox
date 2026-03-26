@@ -6,9 +6,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	gitboxcrypto "github.com/AndrewBudd/gitbox/internal/crypto"
-	"github.com/AndrewBudd/gitbox/internal/hook"
-	"github.com/AndrewBudd/gitbox/internal/store"
+	gitboxcrypto "github.com/andrewbudd/gitbox/internal/crypto"
+	"github.com/andrewbudd/gitbox/internal/hook"
+	"github.com/andrewbudd/gitbox/internal/store"
 	"gopkg.in/yaml.v3"
 )
 

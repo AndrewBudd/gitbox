@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	gitboxcrypto "github.com/AndrewBudd/gitbox/internal/crypto"
+	gitboxcrypto "github.com/andrewbudd/gitbox/internal/crypto"
 	"golang.org/x/crypto/ssh"
 )
 

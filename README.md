@@ -8,10 +8,10 @@ GitBox lets you store secrets directly in version control, encrypted for specifi
 
 ```bash
 # From source (requires Go 1.22+)
-go install github.com/AndrewBudd/gitbox@latest
+go install github.com/andrewbudd/gitbox@latest
 
 # Or clone and build
-git clone https://github.com/AndrewBudd/gitbox.git
+git clone https://github.com/andrewbudd/gitbox.git
 cd gitbox
 go build -o gitbox .
 

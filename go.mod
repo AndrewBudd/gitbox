@@ -1,4 +1,4 @@
-module github.com/AndrewBudd/gitbox
+module github.com/andrewbudd/gitbox
 
 go 1.25.0
 
