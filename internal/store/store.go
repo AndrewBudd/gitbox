@@ -163,7 +163,14 @@ func (s *Store) AddUser(username string, signingKey interface{}) (*Identity, err
 		})
 	}
 
-	// Sign with operator's key if available (proves a known identity vouched for this fetch)
+	path := filepath.Join(s.Root, "identities", username+".yaml")
+
+	// Write first so the key is in the store for IdentifyKey
+	if err := writeYAML(path, id); err != nil {
+		return nil, err
+	}
+
+	// Now sign -- operator's key is findable (may be this user if adding yourself)
 	if signingKey != nil {
 		if _, err := s.IdentifyKey(signingKey); err == nil {
 			data, err := signableBytesForIdentity(*id)
@@ -171,15 +178,12 @@ func (s *Store) AddUser(username string, signingKey interface{}) (*Identity, err
 				sig, err := gitboxcrypto.SignBytes(data, signingKey)
 				if err == nil {
 					id.Sig = sig
+					_ = writeYAML(path, id)
 				}
 			}
 		}
 	}
 
-	path := filepath.Join(s.Root, "identities", username+".yaml")
-	if err := writeYAML(path, id); err != nil {
-		return nil, err
-	}
 	return id, nil
 }
 
