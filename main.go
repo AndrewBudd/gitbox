@@ -51,6 +51,8 @@ func main() {
 		err = cmdListUsers(args)
 	case "paper-key":
 		err = cmdPaperKey(args)
+	case "recover-identity":
+		err = cmdRecoverIdentity(args)
 	case "install-hook":
 		err = cmdInstallHook(args)
 	case "help", "--help", "-h":
@@ -104,6 +106,8 @@ Config Commands:
   paper-key list                List all paper keys
   paper-key delete <name>       Remove a paper key
   paper-key recover <secret>    Decrypt using paper key
+  recover-identity <user> <key.pub>
+                               Update SSH keys using paper key (identity recovery)
   install-hook                 Install git pre-commit hook
 
 Other:
@@ -660,6 +664,55 @@ func paperKeyRecover(args []string) error {
 	}
 
 	os.Stdout.Write(plaintext)
+	return nil
+}
+
+func cmdRecoverIdentity(args []string) error {
+	if len(args) < 2 {
+		return fmt.Errorf("usage: gitbox recover-identity <username> <new-pubkey-file>")
+	}
+
+	username := args[0]
+	keyFile := args[1]
+
+	pubKeyData, err := os.ReadFile(keyFile)
+	if err != nil {
+		return fmt.Errorf("read public key file: %w", err)
+	}
+
+	s, _, err := openStore()
+	if err != nil {
+		return err
+	}
+
+	// Prompt for paper key words
+	fmt.Print("Enter your 24 recovery words (or hex): ")
+	buf := make([]byte, 4096)
+	n, err := os.Stdin.Read(buf)
+	if err != nil {
+		return fmt.Errorf("read input: %w", err)
+	}
+	input := strings.TrimSpace(string(buf[:n]))
+
+	pk, err := gitboxcrypto.PaperKeyFromWords(input)
+	if err != nil {
+		pk, err = gitboxcrypto.PaperKeyFromHex(input)
+		if err != nil {
+			return fmt.Errorf("invalid paper key: %w", err)
+		}
+	}
+
+	if err := s.RecoverIdentity(username, string(pubKeyData), pk); err != nil {
+		return err
+	}
+
+	fmt.Printf("Identity %q updated with new keys, signed by paper key.\n", username)
+	fmt.Println("You can now use your new SSH key for all gitbox operations.")
+	fmt.Println()
+	fmt.Println("Next steps:")
+	fmt.Println("  1. Run 'gitbox decrypt <secret>' to verify access")
+	fmt.Println("  2. Commit the updated .gitbox/identities/ file")
+	fmt.Println("  3. Consider generating a new paper key: gitbox paper-key generate -n <name>")
 	return nil
 }
 

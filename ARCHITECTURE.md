@@ -230,10 +230,16 @@ Sensitive config files are signed with SSH keys to prevent unauthorized modifica
 | GitHub identities | No | GitHub/GHE is the trust anchor |
 | Manual identities | Optional (TOFU) | First writer wins; signing recommended |
 | Paper keys | **Required** | Must be signed by owner's SSH key |
-| Groups | **Required** | Must be signed by a known identity |
+| Groups | **Required** | Must be signed by a known identity or paper key |
+| Identity recovery | **Required** | Must be signed by owner's paper key |
 | Secret manifests | No (authenticated encryption) | NaCl secretbox provides integrity |
 
-Signatures are standard SSH signatures (`ssh.Signer.Sign`), verified against public keys in `.gitbox/identities/`. Signing only occurs when the signing key matches a known identity -- during bootstrap (no identities yet), signing is skipped.
+**Paper keys are a root of trust.** The set of valid signers includes both SSH keys from identities AND paper key private keys. This means a paper key can:
+- Authorize identity updates (re-keying after SSH key loss)
+- Sign group changes
+- Sign new paper key additions
+
+Signatures are standard SSH signatures (`ssh.Signer.Sign`), verified against all known public keys (identity SSH keys + paper key Ed25519 keys). Signing only occurs when the signing key matches a known identity -- during bootstrap (no identities yet), signing is skipped.
 
 ### What GitBox Protects Against
 - **Unauthorized access to secrets in the repository**: Only users whose SSH keys are listed as recipients can decrypt

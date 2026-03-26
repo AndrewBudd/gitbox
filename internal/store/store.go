@@ -12,6 +12,7 @@ import (
 
 	gitboxcrypto "github.com/gitbox/gitbox/internal/crypto"
 	"github.com/gitbox/gitbox/internal/github"
+	"golang.org/x/crypto/ssh"
 	"gopkg.in/yaml.v3"
 )
 
@@ -467,6 +468,67 @@ func (s *Store) SavePaperKey(name string, pk *gitboxcrypto.PaperKey, signingKey 
 	return writeYAML(filepath.Join(dir, name+".yaml"), cfg)
 }
 
+// RecoverIdentity updates a user's SSH keys, signed by a paper key.
+// This is the primary recovery flow: user lost SSH keys, has paper key words,
+// generates new SSH keys, uses paper key to authorize the identity update.
+func (s *Store) RecoverIdentity(username string, newPubKeyLines string, paperKey *gitboxcrypto.PaperKey) error {
+	// Verify this paper key is registered and belongs to this user
+	paperKeys, err := s.ListPaperKeys()
+	if err != nil {
+		return fmt.Errorf("list paper keys: %w", err)
+	}
+	found := false
+	for _, pk := range paperKeys {
+		if pk.Owner == username && pk.Fingerprint == paperKey.ToKeyInfo().Fingerprint {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("paper key does not match any registered paper key for user %q", username)
+	}
+
+	// Parse the new public keys
+	keys, err := gitboxcrypto.ParseSSHPublicKeys(newPubKeyLines)
+	if err != nil {
+		return fmt.Errorf("parse new keys: %w", err)
+	}
+	if len(keys) == 0 {
+		return fmt.Errorf("no supported keys found")
+	}
+
+	// Build updated identity
+	id := &Identity{
+		GitHubUser: username,
+		FetchedAt:  time.Now().UTC(),
+		Source:     "manual",
+	}
+	for _, k := range keys {
+		id.Keys = append(id.Keys, StoredKey{
+			Type:        k.Type,
+			Fingerprint: k.Fingerprint,
+			PublicKey:   k.RawLine,
+		})
+	}
+
+	// Sign with the paper key (paper keys are trusted signers)
+	data, err := signableBytesForIdentity(*id)
+	if err != nil {
+		return fmt.Errorf("marshal for signing: %w", err)
+	}
+	sig, err := gitboxcrypto.SignBytes(data, paperKey.PrivateKey)
+	if err != nil {
+		return fmt.Errorf("sign identity with paper key: %w", err)
+	}
+	id.Sig = sig
+
+	path := filepath.Join(s.Root, "identities", username+".yaml")
+	if err := writeYAML(path, id); err != nil {
+		return err
+	}
+	return nil
+}
+
 // IdentifyKey determines which user a private key belongs to
 // by computing its public key fingerprint and matching against known identities.
 func (s *Store) IdentifyKey(privKey interface{}) (string, error) {
@@ -491,6 +553,12 @@ func (s *Store) IdentifyKey(privKey interface{}) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("no identity found matching key fingerprint %s", fp)
+}
+
+// listPaperKeysRaw reads all paper key configs without signature verification.
+// Used by collectTrustedKeys to build the trust chain (paper keys ARE trust anchors).
+func (s *Store) listPaperKeysRaw() ([]PaperKeyConfig, error) {
+	return s.ListPaperKeys()
 }
 
 // ListPaperKeys returns all paper key configs.
@@ -1178,23 +1246,44 @@ func (s *Store) decryptDEK(manifest *SecretManifest, privKey interface{}) ([32]b
 	return [32]byte{}, fmt.Errorf("no matching key")
 }
 
-// collectTrustedKeys returns all public key lines from all known identities.
-// Used to verify signatures.
+// collectTrustedKeys returns all public keys accepted as valid signers.
+// This includes SSH keys from all known identities AND paper key public keys.
+// Paper keys are a root of trust: they can sign identity updates, group changes,
+// and other paper key additions -- enabling recovery when SSH keys are lost.
 func (s *Store) collectTrustedKeys() []string {
-	users, err := s.ListUsers()
-	if err != nil {
-		return nil
-	}
 	var keys []string
-	for _, u := range users {
-		id, err := s.GetUser(u)
-		if err != nil {
-			continue
-		}
-		for _, k := range id.Keys {
-			keys = append(keys, k.PublicKey)
+
+	// SSH keys from identities
+	users, err := s.ListUsers()
+	if err == nil {
+		for _, u := range users {
+			id, err := s.GetUser(u)
+			if err != nil {
+				continue
+			}
+			for _, k := range id.Keys {
+				keys = append(keys, k.PublicKey)
+			}
 		}
 	}
+
+	// Paper key public keys (as authorized_keys format for signature verification)
+	paperKeys, err := s.listPaperKeysRaw()
+	if err == nil {
+		for _, pk := range paperKeys {
+			pubBytes, err := base64.StdEncoding.DecodeString(pk.PublicKey)
+			if err != nil || len(pubBytes) != 32 {
+				continue
+			}
+			edPub := ed25519.PublicKey(pubBytes)
+			sshPub, err := ssh.NewPublicKey(edPub)
+			if err != nil {
+				continue
+			}
+			keys = append(keys, string(ssh.MarshalAuthorizedKey(sshPub)))
+		}
+	}
+
 	return keys
 }
 

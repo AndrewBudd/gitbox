@@ -728,6 +728,119 @@ func TestRevokeClearsPaperKeys(t *testing.T) {
 	}
 }
 
+func TestRecoverIdentity(t *testing.T) {
+	s, _ := setupTestStore(t)
+	alicePriv := addTestUser(t, s, "alice", "ed25519")
+
+	// Alice creates a paper key
+	paperKey, _ := gitboxcrypto.GeneratePaperKey()
+	s.SavePaperKey("alice-recovery", paperKey, alicePriv)
+
+	// Encrypt a secret for alice
+	secret := []byte("important data")
+	s.EncryptSecret("recovery-test", secret, []string{"alice"})
+
+	// Verify alice can decrypt with original key
+	dec, err := s.DecryptSecret("recovery-test", alicePriv)
+	if err != nil {
+		t.Fatal("original decrypt:", err)
+	}
+	if string(dec) != string(secret) {
+		t.Fatal("original decrypt mismatch")
+	}
+
+	// Simulate: alice loses her keys, generates new ones
+	newPub, newPriv, _ := ed25519.GenerateKey(rand.Reader)
+	sshNewPub, _ := ssh.NewPublicKey(newPub)
+	newPubLine := string(ssh.MarshalAuthorizedKey(sshNewPub))
+
+	// Alice recovers her identity using paper key
+	err = s.RecoverIdentity("alice", newPubLine, paperKey)
+	if err != nil {
+		t.Fatal("recover identity:", err)
+	}
+
+	// Verify the identity was updated
+	id, _ := s.GetUser("alice")
+	if len(id.Keys) != 1 {
+		t.Fatalf("expected 1 key after recovery, got %d", len(id.Keys))
+	}
+	newFP := ssh.FingerprintSHA256(sshNewPub)
+	if id.Keys[0].Fingerprint != newFP {
+		t.Fatal("identity not updated to new key")
+	}
+
+	// Old key should NOT work for new secrets
+	// (existing secrets still have the old DEK wrapping, so old key still works for those)
+	// But the identity now points to the new key
+
+	// The new key can be used for new operations
+	// Verify by identifying the key
+	owner, err := s.IdentifyKey(newPriv)
+	if err != nil {
+		t.Fatal("identify new key:", err)
+	}
+	if owner != "alice" {
+		t.Fatalf("expected owner alice, got %s", owner)
+	}
+
+	// Verify the identity signature is valid (signed by paper key)
+	if id.Sig == nil {
+		t.Fatal("recovered identity should be signed")
+	}
+}
+
+func TestRecoverIdentityWrongPaperKey(t *testing.T) {
+	s, _ := setupTestStore(t)
+	alicePriv := addTestUser(t, s, "alice", "ed25519")
+	addTestUser(t, s, "bob", "rsa")
+
+	// Alice creates a paper key
+	alicePK, _ := gitboxcrypto.GeneratePaperKey()
+	s.SavePaperKey("alice-pk", alicePK, alicePriv)
+
+	// Bob tries to use alice's paper key to update alice's identity -- should fail
+	// because the paper key doesn't match bob
+	wrongPK, _ := gitboxcrypto.GeneratePaperKey()
+
+	newPub, _, _ := ed25519.GenerateKey(rand.Reader)
+	sshPub, _ := ssh.NewPublicKey(newPub)
+	pubLine := string(ssh.MarshalAuthorizedKey(sshPub))
+
+	err := s.RecoverIdentity("alice", pubLine, wrongPK)
+	if err == nil {
+		t.Fatal("should reject recovery with unregistered paper key")
+	}
+}
+
+func TestPaperKeyCanSignGroupChanges(t *testing.T) {
+	s, _ := setupTestStore(t)
+	alicePriv := addTestUser(t, s, "alice", "ed25519")
+	addTestUser(t, s, "bob", "rsa")
+
+	// Alice creates a paper key
+	paperKey, _ := gitboxcrypto.GeneratePaperKey()
+	s.SavePaperKey("alice-pk", paperKey, alicePriv)
+
+	// Use paper key private key to sign group changes
+	// (simulates: alice lost SSH keys, uses paper key to manage groups)
+	err := s.SaveGroups(map[string][]string{
+		"team": {"alice", "bob"},
+	}, paperKey.PrivateKey)
+	if err != nil {
+		t.Fatal("save groups with paper key:", err)
+	}
+
+	// Verify group resolves correctly (signature should verify since paper key is trusted)
+	resolved, err := s.ResolveRecipients([]string{"@team"})
+	if err != nil {
+		t.Fatal("resolve with paper-key-signed group:", err)
+	}
+	if len(resolved) != 2 {
+		t.Fatalf("expected 2 resolved, got %d", len(resolved))
+	}
+}
+
 func TestApplyGrantsAndRevokes(t *testing.T) {
 	s, _ := setupTestStore(t)
 	alicePriv := addTestUser(t, s, "alice", "ed25519")

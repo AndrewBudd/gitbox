@@ -192,11 +192,34 @@ gitbox paper-key delete office-safe
 ```
 
 Paper keys are:
+- **Your root of trust** -- can sign identity updates, group changes, and new paper keys
 - **Owned by your identity** -- you can only create paper keys for yourself
 - **Signed with your SSH key** -- unsigned paper keys are rejected at encrypt time
 - **Automatically included** in all new secrets as an additional recipient
 - **Removed when you're revoked** -- revoking a user also strips their paper keys from secrets
 - **Encoded as 24 BIP39 mnemonic words** with a SHA-256 checksum (also accepts hex)
+
+### Identity Recovery
+
+If you lose all your SSH keys, use your paper key to recover:
+
+```bash
+# Generate new SSH keys
+ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519
+
+# Recover your identity (signs the update with your paper key)
+gitbox recover-identity myusername ~/.ssh/id_ed25519.pub
+# Enter your 24 recovery words when prompted
+
+# Verify access
+gitbox decrypt my-secret
+
+# Commit the updated identity
+git add .gitbox/identities/
+git commit -m "recover identity after key loss"
+```
+
+The paper key acts as a signing authority: it can authorize changes to your own identity, sign group modifications, and sign new paper keys. This is what makes it safe to write down and store offline -- it's the break-glass root of trust for your gitbox identity.
 
 ## Pre-Commit Hook
 
@@ -228,10 +251,11 @@ Sensitive config files are signed with SSH keys to prevent unauthorized modifica
 |---|---|---|
 | GitHub identities | Not signed | GitHub is the trust anchor |
 | Manual identities | Optional (TOFU) | First writer wins; signing recommended |
-| Paper keys | **Required** | Must be signed by a known identity |
-| Groups | **Required** | Must be signed by a known identity |
+| Paper keys | **Required** | Must be signed by owner's SSH key |
+| Groups | **Required** | Must be signed by a known identity or paper key |
+| Identity recovery | **Required** | Must be signed by owner's paper key |
 
-Paper keys and groups are verified at encrypt time. An attacker with repo write access cannot inject a backdoor paper key or modify group membership without a valid SSH signature from a known user.
+Paper keys are a **root of trust**: they can sign identity updates, group changes, and new paper keys. This means if you lose all your SSH keys, your paper key can authorize the recovery. Paper keys and groups are verified at encrypt time -- an attacker with repo write access cannot inject a backdoor without a valid signature.
 
 ## CLI Reference
 
@@ -256,11 +280,12 @@ Secrets:
   revoke <name> <user>                    Revoke access (re-encrypts)
   list                                    List secrets and recipients
 
-Paper Keys:
+Paper Keys & Recovery:
   paper-key generate [-n name]            Generate recovery key (24 words)
   paper-key list                          List all paper keys and owners
   paper-key delete <name>                 Remove a paper key
   paper-key recover <secret>              Decrypt using paper key words
+  recover-identity <user> <key.pub>       Re-key identity using paper key
 
 Config:
   init                                    Initialize .gitbox
