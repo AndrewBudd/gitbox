@@ -4,6 +4,21 @@ Encrypt secrets in git repositories using GitHub SSH keys as identity.
 
 GitBox lets you store secrets directly in version control, encrypted for specific GitHub users. Recipients are specified by GitHub username -- their SSH public keys are fetched automatically.
 
+## Install
+
+```bash
+# From source (requires Go 1.22+)
+go install github.com/gitbox/gitbox@latest
+
+# Or clone and build
+git clone https://github.com/AndrewBudd/gitbox.git
+cd gitbox
+go build -o gitbox .
+
+# Move to PATH
+sudo mv gitbox /usr/local/bin/
+```
+
 ## How It Works
 
 1. Each secret is encrypted with a random Data Encryption Key (DEK) using NaCl secretbox
@@ -12,12 +27,11 @@ GitBox lets you store secrets directly in version control, encrypted for specifi
 4. Encrypted data and wrapped keys are stored as YAML in `.gitbox/`
 5. A pre-commit hook prevents plaintext secrets from being committed
 
+Your `~/.ssh/id_ed25519` or `~/.ssh/id_rsa` is used automatically for decryption and signing. The `-k` flag is only needed if your key is in a non-standard location.
+
 ## Quick Start
 
 ```bash
-# Build
-go build -o gitbox .
-
 # Initialize in your git repo
 cd your-repo
 gitbox init
@@ -49,6 +63,10 @@ gitbox list
 
 # List registered users
 gitbox list-users
+
+# Commit the encrypted data
+git add .gitbox/ .gitignore
+git commit -m "add encrypted secrets"
 ```
 
 ## Groups
@@ -74,7 +92,7 @@ gitbox group list
 gitbox group delete old-team
 ```
 
-Groups can reference other groups (nested). Resolution is recursive with cycle detection.
+Groups can reference other groups (nested). Resolution is recursive with cycle detection. Group changes are signed with your SSH key to prevent unauthorized modifications.
 
 ## Key Management
 
@@ -90,11 +108,11 @@ gitbox add-key contractor "ssh-ed25519 AAAA... user@host"
 gitbox add-key alice ~/.ssh/alice_new_key.pub
 
 # When a user's GitHub keys change, refresh and rebox all their secrets
-gitbox refresh-keys alice -k ~/.ssh/id_ed25519
-gitbox refresh-keys --all -k ~/.ssh/id_ed25519
+gitbox refresh-keys alice
+gitbox refresh-keys --all
 ```
 
-`refresh-keys` re-fetches from GitHub and re-wraps the DEK for every secret the user has access to, using the new keys. Old key wrappings are replaced.
+`refresh-keys` re-fetches from GitHub and re-wraps the DEK for every secret the user has access to, using the new keys. It also prunes any paper keys whose signatures no longer verify against the updated key set.
 
 ## Declarative Config (gitbox.yaml)
 
@@ -135,7 +153,7 @@ Apply the config to converge state:
 
 ```bash
 # Apply config (grants/revokes as needed to match desired state)
-gitbox apply gitbox.yaml -k ~/.ssh/id_ed25519
+gitbox apply gitbox.yaml
 
 # Export current state to gitbox.yaml
 gitbox export > gitbox.yaml
@@ -150,20 +168,35 @@ gitbox export > gitbox.yaml
 
 ## Paper Key (Emergency Recovery)
 
-Generate a paper key for emergency access if you lose your SSH keys:
+Paper keys are offline recovery keys tied to your identity. If you lose all your SSH keys, a paper key lets you decrypt your secrets.
 
 ```bash
-gitbox paper-key generate
+# Generate a named paper key (displayed as 24 mnemonic words)
+gitbox paper-key generate -n office-safe
+
+# Output:
+#  1. hundred       2. involve       3. aim           4. neutral
+#  5. ketchup       6. summer        7. donkey        8. absorb
+#  ...
+# 24. heavy
+
+# List all paper keys
+gitbox paper-key list
+
+# Recover a secret using the paper key words
+gitbox paper-key recover my-secret
+# Enter your 24 recovery words (or hex): ...
+
+# Delete a paper key
+gitbox paper-key delete office-safe
 ```
 
-This displays a hex-encoded seed. **Write it down and store it securely** -- it won't be shown again. New secrets are automatically encrypted for the paper key.
-
-To recover a secret using the paper key:
-
-```bash
-gitbox paper-key recover <secret-name>
-# Enter the hex seed when prompted
-```
+Paper keys are:
+- **Owned by your identity** -- you can only create paper keys for yourself
+- **Signed with your SSH key** -- unsigned paper keys are rejected at encrypt time
+- **Automatically included** in all new secrets as an additional recipient
+- **Removed when you're revoked** -- revoking a user also strips their paper keys from secrets
+- **Encoded as 24 BIP39 mnemonic words** with a SHA-256 checksum (also accepts hex)
 
 ## Pre-Commit Hook
 
@@ -182,10 +215,23 @@ The hook blocks commits that include tracked plaintext files, ensuring only encr
 | `.gitbox/config.yaml` | Yes | Version info |
 | `.gitbox/identities/*.yaml` | Yes | Public keys (safe) |
 | `.gitbox/secrets/*.yaml` | Yes | Encrypted data + wrapped DEKs |
-| `.gitbox/groups.yaml` | Yes | Group definitions |
-| `.gitbox/paperkey.yaml` | Yes | Paper key public key (safe) |
+| `.gitbox/groups.yaml` | Yes | Group definitions (signed) |
+| `.gitbox/paperkeys/*.yaml` | Yes | Paper key public keys (signed) |
 | `gitbox.yaml` | Yes | Declarative config (no secrets) |
 | Plaintext secret files | **No** | Auto-added to `.gitignore` |
+
+## Signing and Trust
+
+Sensitive config files are signed with SSH keys to prevent unauthorized modification:
+
+| Resource | Signing | Trust model |
+|---|---|---|
+| GitHub identities | Not signed | GitHub is the trust anchor |
+| Manual identities | Optional (TOFU) | First writer wins; signing recommended |
+| Paper keys | **Required** | Must be signed by a known identity |
+| Groups | **Required** | Must be signed by a known identity |
+
+Paper keys and groups are verified at encrypt time. An attacker with repo write access cannot inject a backdoor paper key or modify group membership without a valid SSH signature from a known user.
 
 ## CLI Reference
 
@@ -193,11 +239,11 @@ The hook blocks commits that include tracked plaintext files, ensuring only encr
 Identity:
   add-user <username>                     Fetch GitHub user's SSH keys
   add-key <user> <key-file-or-string>     Add SSH key manually
-  refresh-keys <user|--all> [-k key]      Re-fetch keys, rebox secrets
+  refresh-keys <user|--all>               Re-fetch keys, rebox secrets
   list-users                              List known identities
 
 Groups:
-  group create <name> <members>           Create a group
+  group create <name> <members>           Create a group (signed)
   group add <name> <user>                 Add member to group
   group remove <name> <user>              Remove member from group
   group list                              List all groups
@@ -205,18 +251,26 @@ Groups:
 
 Secrets:
   encrypt <file> -n <name> -r <recips>    Encrypt (recips: users or @groups)
-  decrypt <name> [-k key] [-o file]       Decrypt a secret
-  grant <name> <user> [-k key]            Grant access
-  revoke <name> <user> [-k key]           Revoke access (re-encrypts)
+  decrypt <name> [-o file]                Decrypt a secret
+  grant <name> <user>                     Grant access
+  revoke <name> <user>                    Revoke access (re-encrypts)
   list                                    List secrets and recipients
+
+Paper Keys:
+  paper-key generate [-n name]            Generate recovery key (24 words)
+  paper-key list                          List all paper keys and owners
+  paper-key delete <name>                 Remove a paper key
+  paper-key recover <secret>              Decrypt using paper key words
 
 Config:
   init                                    Initialize .gitbox
-  apply [gitbox.yaml] [-k key]            Apply declarative config
+  apply [gitbox.yaml]                     Apply declarative config
   export                                  Export state as YAML
-  paper-key generate                      Generate recovery paper key
-  paper-key recover <name>                Decrypt with paper key
   install-hook                            Install pre-commit hook
+
+All commands that need a private key (decrypt, grant, revoke, encrypt, etc.)
+automatically use ~/.ssh/id_ed25519 or ~/.ssh/id_rsa. Use -k <path> to
+override with a specific key.
 ```
 
 ## Security
@@ -224,16 +278,18 @@ Config:
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full cryptographic design, threat model, and security considerations.
 
 Key points:
-- Uses NaCl secretbox (XSalsa20-Poly1305) for authenticated encryption
-- RSA keys: RSA-OAEP with SHA-256
-- Ed25519 keys: Converted to X25519, ephemeral ECDH + NaCl secretbox
-- Revocation generates a new DEK and re-encrypts (forward secrecy)
-- Paper key provides offline emergency recovery
-- Key refresh re-wraps DEKs when SSH keys rotate
+- NaCl secretbox (XSalsa20-Poly1305) for authenticated encryption
+- RSA-OAEP with SHA-256 for RSA key wrapping
+- Ed25519 to X25519 conversion + ephemeral ECDH for Ed25519 key wrapping
+- Per-secret DEKs with envelope encryption
+- Revocation generates a new DEK and re-encrypts
+- Paper keys provide offline emergency recovery, tied to identity
+- SSH signatures on paper keys and groups prevent unauthorized injection
+- Key refresh re-wraps DEKs and prunes invalid paper keys
 
 ## Requirements
 
 - Go 1.22+
 - Git
-- SSH keys in `~/.ssh/` (or specify with `-k`)
+- SSH keys in `~/.ssh/` (auto-discovered, or specify with `-k`)
 - Network access to `github.com` (for fetching public keys, optional with manual keys)
