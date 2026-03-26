@@ -596,7 +596,7 @@ func paperKeyList() error {
 	}
 
 	for _, k := range keys {
-		fmt.Printf("  %-20s %s  (created: %s)\n", k.Name, k.Fingerprint, k.CreatedAt.Format("2006-01-02"))
+		fmt.Printf("  %-20s owner: %-15s %s  (created: %s)\n", k.Name, k.Owner, k.Fingerprint, k.CreatedAt.Format("2006-01-02"))
 	}
 	return nil
 }

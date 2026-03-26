@@ -673,6 +673,61 @@ func TestMultiplePaperKeys(t *testing.T) {
 	}
 }
 
+func TestRevokeClearsPaperKeys(t *testing.T) {
+	s, _ := setupTestStore(t)
+	alicePriv := addTestUser(t, s, "alice", "ed25519")
+	bobPriv := addTestUser(t, s, "bob", "rsa")
+
+	// Bob creates a paper key
+	bobPK, _ := gitboxcrypto.GeneratePaperKey()
+	s.SavePaperKey("bob-recovery", bobPK, bobPriv)
+
+	// Encrypt for both, paper key auto-included
+	secret := []byte("revoke-pk-test")
+	s.EncryptSecret("pk-revoke-test", secret, []string{"alice", "bob"})
+
+	// Verify bob's paper key is a recipient
+	manifest, _ := s.GetSecret("pk-revoke-test")
+	hasBobPK := false
+	for _, re := range manifest.Recipients {
+		if strings.Contains(re.GitHubUser, "bob") && isPaperKeyRecipient(re.GitHubUser) {
+			hasBobPK = true
+		}
+	}
+	if !hasBobPK {
+		t.Fatal("bob's paper key should be a recipient before revoke")
+	}
+
+	// Revoke bob -- should also remove bob's paper key
+	err := s.RevokeAccess("pk-revoke-test", "bob", alicePriv)
+	if err != nil {
+		t.Fatal("revoke:", err)
+	}
+
+	// Verify bob's paper key is gone
+	manifest, _ = s.GetSecret("pk-revoke-test")
+	for _, re := range manifest.Recipients {
+		if strings.Contains(re.GitHubUser, "bob") {
+			t.Fatalf("bob should have no recipients after revoke, found: %s", re.GitHubUser)
+		}
+	}
+
+	// Alice can still decrypt
+	decrypted, err := s.DecryptSecret("pk-revoke-test", alicePriv)
+	if err != nil {
+		t.Fatal("alice decrypt after bob revoke:", err)
+	}
+	if string(decrypted) != string(secret) {
+		t.Fatal("content mismatch")
+	}
+
+	// Bob's paper key can NOT decrypt
+	_, err = s.DecryptSecret("pk-revoke-test", bobPK.PrivateKey)
+	if err == nil {
+		t.Fatal("bob's paper key should not work after revoke")
+	}
+}
+
 func TestApplyGrantsAndRevokes(t *testing.T) {
 	s, _ := setupTestStore(t)
 	alicePriv := addTestUser(t, s, "alice", "ed25519")

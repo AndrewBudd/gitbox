@@ -83,6 +83,7 @@ type SecretConfig struct {
 // PaperKeyConfig stores a paper key's public info in .gitbox/paperkeys/
 type PaperKeyConfig struct {
 	Name        string                  `yaml:"name"`
+	Owner       string                  `yaml:"owner"`        // username of the identity this paper key belongs to
 	PublicKey   string                  `yaml:"public_key"`   // base64 ed25519 public key
 	Fingerprint string                 `yaml:"fingerprint"`
 	CreatedAt  time.Time               `yaml:"created_at"`
@@ -349,19 +350,21 @@ func (s *Store) RevokeAccess(secretName, username string, privKey interface{}) e
 		return fmt.Errorf("cannot decrypt secret: %w", err)
 	}
 
-	// Determine remaining recipients
+	// Determine remaining recipients, excluding the revoked user
+	// and any paper keys owned by the revoked user
 	remaining := make(map[string]bool)
-	for _, re := range manifest.Recipients {
-		if re.GitHubUser != username && re.GitHubUser != "" {
-			remaining[re.GitHubUser] = true
-		}
-	}
-	// Also keep paper key entries
 	hasPaperKey := false
 	for _, re := range manifest.Recipients {
+		if re.GitHubUser == username || re.GitHubUser == "" {
+			continue
+		}
+		if isPaperKeyOwnedBy(re.GitHubUser, username) {
+			continue // Drop paper keys belonging to the revoked user
+		}
 		if isPaperKeyRecipient(re.GitHubUser) {
 			hasPaperKey = true
-			break
+		} else {
+			remaining[re.GitHubUser] = true
 		}
 	}
 
@@ -414,32 +417,68 @@ func (s *Store) RevokeAccess(secretName, username string, privKey interface{}) e
 	return writeYAML(path, manifest)
 }
 
-// SavePaperKey stores a paper key's public information, signed by the given private key.
+// SavePaperKey stores a paper key's public information.
+// The signing key must match a known identity -- that identity becomes the paper key's owner.
+// You can only create paper keys for yourself.
 func (s *Store) SavePaperKey(name string, pk *gitboxcrypto.PaperKey, signingKey interface{}) error {
+	if signingKey == nil {
+		return fmt.Errorf("signing key required to create a paper key")
+	}
+
+	// Determine owner by matching signing key to a known identity
+	owner, err := s.IdentifyKey(signingKey)
+	if err != nil {
+		return fmt.Errorf("cannot determine paper key owner: %w", err)
+	}
+
 	dir := filepath.Join(s.Root, "paperkeys")
 	os.MkdirAll(dir, 0755)
 
 	cfg := PaperKeyConfig{
 		Name:        name,
+		Owner:       owner,
 		PublicKey:   pk.PublicKeyBase64(),
 		Fingerprint: pk.ToKeyInfo().Fingerprint,
 		CreatedAt:  time.Now().UTC(),
 	}
 
-	// Sign the paper key config
-	if signingKey != nil {
-		data, err := signableBytesForPaperKey(cfg)
-		if err != nil {
-			return fmt.Errorf("marshal for signing: %w", err)
-		}
-		sig, err := gitboxcrypto.SignBytes(data, signingKey)
-		if err != nil {
-			return fmt.Errorf("sign paper key: %w", err)
-		}
-		cfg.Sig = sig
+	data, err := signableBytesForPaperKey(cfg)
+	if err != nil {
+		return fmt.Errorf("marshal for signing: %w", err)
 	}
+	sig, err := gitboxcrypto.SignBytes(data, signingKey)
+	if err != nil {
+		return fmt.Errorf("sign paper key: %w", err)
+	}
+	cfg.Sig = sig
 
 	return writeYAML(filepath.Join(dir, name+".yaml"), cfg)
+}
+
+// IdentifyKey determines which user a private key belongs to
+// by computing its public key fingerprint and matching against known identities.
+func (s *Store) IdentifyKey(privKey interface{}) (string, error) {
+	fp, err := gitboxcrypto.FingerprintPrivateKey(privKey)
+	if err != nil {
+		return "", err
+	}
+
+	users, err := s.ListUsers()
+	if err != nil {
+		return "", err
+	}
+	for _, u := range users {
+		id, err := s.GetUser(u)
+		if err != nil {
+			continue
+		}
+		for _, k := range id.Keys {
+			if k.Fingerprint == fp {
+				return u, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("no identity found matching key fingerprint %s", fp)
 }
 
 // ListPaperKeys returns all paper key configs.
@@ -633,10 +672,17 @@ func (s *Store) RefreshUserKeys(username string, privKey interface{}) (*Identity
 		return nil, 0, fmt.Errorf("no supported keys found for user %q", username)
 	}
 
+	// Build new key fingerprint set to detect removed keys
+	newFingerprints := make(map[string]bool)
+	for _, k := range keys {
+		newFingerprints[k.Fingerprint] = true
+	}
+
 	// Update identity
 	id := &Identity{
 		GitHubUser: username,
 		FetchedAt:  time.Now().UTC(),
+		Source:     "github",
 	}
 	for _, k := range keys {
 		id.Keys = append(id.Keys, StoredKey{
@@ -648,6 +694,21 @@ func (s *Store) RefreshUserKeys(username string, privKey interface{}) (*Identity
 	path := filepath.Join(s.Root, "identities", username+".yaml")
 	if err := writeYAML(path, id); err != nil {
 		return nil, 0, err
+	}
+
+	// Prune paper keys owned by this user that were signed by now-removed keys.
+	// After a key refresh, the signing key may no longer be in the identity,
+	// which means the paper key signature won't verify. Remove them proactively.
+	paperKeys, _ := s.ListPaperKeys()
+	for _, pk := range paperKeys {
+		if pk.Owner != username {
+			continue
+		}
+		// Verify the paper key signature still holds with the new key set
+		if err := s.verifyPaperKey(&pk); err != nil {
+			fmt.Fprintf(os.Stderr, "Pruning paper key %q (owner %s): signature no longer valid after key refresh\n", pk.Name, pk.Owner)
+			s.DeletePaperKey(pk.Name)
+		}
 	}
 
 	// Find all secrets this user has access to and re-wrap
@@ -953,6 +1014,25 @@ func isPaperKeyRecipient(username string) bool {
 	return strings.HasPrefix(username, "__paper_key__")
 }
 
+// isPaperKeyOwnedBy checks if a paper key recipient string belongs to a specific user.
+// Format: __paper_key__:owner:name
+func isPaperKeyOwnedBy(recipient, owner string) bool {
+	if !isPaperKeyRecipient(recipient) {
+		return false
+	}
+	parts := strings.SplitN(recipient, ":", 3)
+	return len(parts) >= 2 && parts[1] == owner
+}
+
+// paperKeyOwner extracts the owner from a paper key recipient string.
+func paperKeyOwner(recipient string) string {
+	parts := strings.SplitN(recipient, ":", 3)
+	if len(parts) >= 2 {
+		return parts[1]
+	}
+	return ""
+}
+
 func toSet(items []string) map[string]bool {
 	s := make(map[string]bool)
 	for _, item := range items {
@@ -1048,7 +1128,7 @@ func (s *Store) wrapDEKForPaperKey(dek [32]byte) ([]RecipientEntry, error) {
 		}
 
 		entries = append(entries, RecipientEntry{
-			GitHubUser:      "__paper_key__:" + cfg.Name,
+			GitHubUser:      "__paper_key__:" + cfg.Owner + ":" + cfg.Name,
 			KeyFingerprint:  wrapped.KeyFingerprint,
 			KeyType:         wrapped.KeyType,
 			WrappedKey:      wrapped.WrappedKey,

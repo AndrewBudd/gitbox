@@ -313,3 +313,12 @@ func FingerprintPublicKey(pub crypto.PublicKey) (string, error) {
 	}
 	return ssh.FingerprintSHA256(sshPub), nil
 }
+
+// FingerprintPrivateKey returns the SSH fingerprint for the public half of a private key.
+func FingerprintPrivateKey(privKey interface{}) (string, error) {
+	signer, err := ssh.NewSignerFromKey(privKey)
+	if err != nil {
+		return "", fmt.Errorf("create signer: %w", err)
+	}
+	return ssh.FingerprintSHA256(signer.PublicKey()), nil
+}
