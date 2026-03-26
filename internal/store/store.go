@@ -22,7 +22,8 @@ type Store struct {
 
 // Config is the top-level .gitbox/config.yaml
 type Config struct {
-	Version int `yaml:"version"`
+	Version  int    `yaml:"version"`
+	GitHost  string `yaml:"git_host,omitempty"` // e.g. "github.com" or "git.corp.com"
 }
 
 // Identity represents a GitHub user's public keys cached locally.
@@ -90,6 +91,15 @@ type PaperKeyConfig struct {
 	Sig        *gitboxcrypto.Signature `yaml:"signature,omitempty"`
 }
 
+// GitHost returns the configured GitHub host for this store.
+func (s *Store) GitHost() string {
+	var cfg Config
+	if err := readYAML(filepath.Join(s.Root, "config.yaml"), &cfg); err == nil && cfg.GitHost != "" {
+		return cfg.GitHost
+	}
+	return github.DefaultHost
+}
+
 // Open opens an existing .gitbox store in the given repo root.
 func Open(repoRoot string) (*Store, error) {
 	root := filepath.Join(repoRoot, ".gitbox")
@@ -110,8 +120,10 @@ func Init(repoRoot string) (*Store, error) {
 		}
 	}
 
-	// Write config
-	cfg := Config{Version: 1}
+	// Detect GitHub host from git remote origin
+	host := github.DetectHost(repoRoot)
+
+	cfg := Config{Version: 1, GitHost: host}
 	if err := writeYAML(filepath.Join(root, "config.yaml"), cfg); err != nil {
 		return nil, err
 	}
@@ -121,10 +133,10 @@ func Init(repoRoot string) (*Store, error) {
 	return &Store{Root: root}, nil
 }
 
-// AddUser fetches a GitHub user's SSH keys and stores them.
+// AddUser fetches a user's SSH keys from the configured GitHub host and stores them.
 // GitHub-fetched identities are trusted by virtue of GitHub as the authority.
 func (s *Store) AddUser(username string) (*Identity, error) {
-	rawKeys, err := github.FetchUserKeys(username)
+	rawKeys, err := github.FetchUserKeys(s.GitHost(), username)
 	if err != nil {
 		return nil, err
 	}
@@ -588,17 +600,20 @@ func (s *Store) AddManualUser(username string, pubKeyLines string, signingKey in
 		})
 	}
 
-	// Sign with the operator's key
+	// Sign with the operator's key if it matches a known identity.
+	// During bootstrap (no identities yet), skip signing.
 	if signingKey != nil {
-		data, err := signableBytesForIdentity(*id)
-		if err != nil {
-			return nil, fmt.Errorf("marshal for signing: %w", err)
+		if _, err := s.IdentifyKey(signingKey); err == nil {
+			data, err := signableBytesForIdentity(*id)
+			if err != nil {
+				return nil, fmt.Errorf("marshal for signing: %w", err)
+			}
+			sig, err := gitboxcrypto.SignBytes(data, signingKey)
+			if err != nil {
+				return nil, fmt.Errorf("sign identity: %w", err)
+			}
+			id.Sig = sig
 		}
-		sig, err := gitboxcrypto.SignBytes(data, signingKey)
-		if err != nil {
-			return nil, fmt.Errorf("sign identity: %w", err)
-		}
-		id.Sig = sig
 	}
 
 	path := filepath.Join(s.Root, "identities", username+".yaml")
@@ -658,8 +673,7 @@ func (s *Store) AddKeyToUser(username string, pubKeyLines string) ([]StoredKey, 
 // RefreshUserKeys re-fetches a user's keys from GitHub and re-wraps DEKs
 // for all secrets the user has access to.
 func (s *Store) RefreshUserKeys(username string, privKey interface{}) (*Identity, int, error) {
-	// Re-fetch from GitHub
-	rawKeys, err := github.FetchUserKeys(username)
+	rawKeys, err := github.FetchUserKeys(s.GitHost(), username)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -778,10 +792,18 @@ type GroupsConfig struct {
 
 // SaveGroups writes the groups config, signing each group.
 func (s *Store) SaveGroups(groups map[string][]string, signingKey interface{}) error {
+	// Only sign if key matches a known identity
+	canSign := false
+	if signingKey != nil {
+		if _, err := s.IdentifyKey(signingKey); err == nil {
+			canSign = true
+		}
+	}
+
 	cfg := GroupsConfig{}
 	for name, members := range groups {
 		g := Group{Name: name, Members: members}
-		if signingKey != nil {
+		if canSign {
 			data, err := signableBytesForGroup(g)
 			if err == nil {
 				sig, err := gitboxcrypto.SignBytes(data, signingKey)

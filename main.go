@@ -209,7 +209,11 @@ func cmdInit(args []string) error {
 	if err != nil {
 		return err
 	}
+	host := s.GitHost()
 	fmt.Printf("Initialized gitbox in %s\n", s.Root)
+	if host != "github.com" {
+		fmt.Printf("  Detected GitHub Enterprise: %s\n", host)
+	}
 	return nil
 }
 
@@ -224,7 +228,7 @@ func cmdAddUser(args []string) error {
 		return err
 	}
 
-	fmt.Printf("Fetching SSH keys for %s from GitHub...\n", username)
+	fmt.Printf("Fetching SSH keys for %s from %s...\n", username, s.GitHost())
 	id, err := s.AddUser(username)
 	if err != nil {
 		return err
