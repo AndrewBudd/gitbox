@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	gitboxcrypto "github.com/gitbox/gitbox/internal/crypto"
-	"github.com/gitbox/gitbox/internal/github"
+	gitboxcrypto "github.com/AndrewBudd/gitbox/internal/crypto"
+	"github.com/AndrewBudd/gitbox/internal/github"
 	"golang.org/x/crypto/ssh"
 	"gopkg.in/yaml.v3"
 )
