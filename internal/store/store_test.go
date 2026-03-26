@@ -60,7 +60,7 @@ func addTestUser(t *testing.T, s *Store, username string, keyType string) interf
 
 	id := &Identity{
 		GitHubUser: username,
-		Source:     "github", // Mark as GitHub-sourced so signature verification is skipped in tests
+		Source:     "github",
 		Keys: []StoredKey{{
 			Type:        sshPubKey.Type(),
 			Fingerprint: fingerprint,
@@ -68,7 +68,22 @@ func addTestUser(t *testing.T, s *Store, username string, keyType string) interf
 		}},
 	}
 
+	// Write first so the key is in the store for collectTrustedKeys
 	path := filepath.Join(s.Root, "identities", username+".yaml")
+	if err := writeYAML(path, id); err != nil {
+		t.Fatal(err)
+	}
+
+	// Self-sign (the key is now in the store, so it's a valid signer)
+	data, err := signableBytesForIdentity(*id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig, err := gitboxcrypto.SignBytes(data, privKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id.Sig = sig
 	if err := writeYAML(path, id); err != nil {
 		t.Fatal(err)
 	}

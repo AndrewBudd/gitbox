@@ -29,35 +29,11 @@ test -f .gitbox/config.yaml
 echo "PASS: init"
 
 echo ""
-echo "--- Step 2: Add users (using local keys as mock) ---"
-# We can't fetch from GitHub in tests, so we'll manually create identities
-# using the test keys we generated
-
-# Create identity files manually (simulating what add-user does with GitHub)
-mkdir -p .gitbox/identities
-
-# Create alice (ed25519)
-cat > .gitbox/identities/alice.yaml << YAML
-github_user: alice
-source: github
-keys:
-  - type: ssh-ed25519
-    fingerprint: "$(ssh-keygen -l -f "$WORKDIR/.ssh/id_ed25519.pub" -E sha256 | awk '{print $2}')"
-    public_key: "$(cat "$WORKDIR/.ssh/id_ed25519.pub")"
-fetched_at: "2024-01-01T00:00:00Z"
-YAML
-
-# Create bob (rsa)
-cat > .gitbox/identities/bob.yaml << YAML
-github_user: bob
-source: github
-keys:
-  - type: ssh-rsa
-    fingerprint: "$(ssh-keygen -l -f "$WORKDIR/.ssh/id_rsa.pub" -E sha256 | awk '{print $2}')"
-    public_key: "$(cat "$WORKDIR/.ssh/id_rsa.pub")"
-fetched_at: "2024-01-01T00:00:00Z"
-YAML
-
+echo "--- Step 2: Add users (using add-key) ---"
+# Alice is first (bootstrap -- self-signs with her own key)
+$GITBOX add-key alice "$WORKDIR/.ssh/id_ed25519.pub" -k "$WORKDIR/.ssh/id_ed25519"
+# Bob is signed by alice
+$GITBOX add-key bob "$WORKDIR/.ssh/id_rsa.pub" -k "$WORKDIR/.ssh/id_ed25519"
 echo "PASS: created test identities"
 
 echo ""

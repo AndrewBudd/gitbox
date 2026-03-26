@@ -24,8 +24,8 @@ ssh-keygen -t ed25519 -f "$WORKDIR/diana_key" -N "" -q
 $GITBOX init > /dev/null
 
 # ================================================================
-echo "--- Test 1: Manual key add (bootstrap - no signing key needed) ---"
-$GITBOX add-key alice "$WORKDIR/alice_key.pub"
+echo "--- Test 1: Manual key add (bootstrap - self-signed) ---"
+$GITBOX add-key alice "$WORKDIR/alice_key.pub" -k "$WORKDIR/alice_key"
 echo "PASS: add-key from file (bootstrap)"
 
 echo ""
@@ -36,7 +36,7 @@ echo "PASS: add-key inline (signed)"
 echo ""
 echo "--- Test 3: Add second key to existing user ---"
 ssh-keygen -t rsa -b 2048 -f "$WORKDIR/alice_key2" -N "" -q
-$GITBOX add-key alice "$WORKDIR/alice_key2.pub"
+$GITBOX add-key alice "$WORKDIR/alice_key2.pub" -k "$WORKDIR/alice_key"
 echo "PASS: add additional key to existing user"
 
 echo ""

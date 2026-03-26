@@ -232,8 +232,11 @@ func cmdAddUser(args []string) error {
 		return err
 	}
 
+	// Auto-discover signing key to vouch for the GitHub fetch
+	signingKey, _ := loadPrivateKey("")
+
 	fmt.Printf("Fetching SSH keys for %s from %s...\n", username, s.GitHost())
-	id, err := s.AddUser(username)
+	id, err := s.AddUser(username, signingKey)
 	if err != nil {
 		return err
 	}

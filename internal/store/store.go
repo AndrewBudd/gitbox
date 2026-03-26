@@ -136,7 +136,7 @@ func Init(repoRoot string) (*Store, error) {
 
 // AddUser fetches a user's SSH keys from the configured GitHub host and stores them.
 // GitHub-fetched identities are trusted by virtue of GitHub as the authority.
-func (s *Store) AddUser(username string) (*Identity, error) {
+func (s *Store) AddUser(username string, signingKey interface{}) (*Identity, error) {
 	rawKeys, err := github.FetchUserKeys(s.GitHost(), username)
 	if err != nil {
 		return nil, err
@@ -161,6 +161,19 @@ func (s *Store) AddUser(username string) (*Identity, error) {
 			Fingerprint: k.Fingerprint,
 			PublicKey:   k.RawLine,
 		})
+	}
+
+	// Sign with operator's key if available (proves a known identity vouched for this fetch)
+	if signingKey != nil {
+		if _, err := s.IdentifyKey(signingKey); err == nil {
+			data, err := signableBytesForIdentity(*id)
+			if err == nil {
+				sig, err := gitboxcrypto.SignBytes(data, signingKey)
+				if err == nil {
+					id.Sig = sig
+				}
+			}
+		}
 	}
 
 	path := filepath.Join(s.Root, "identities", username+".yaml")
@@ -675,26 +688,44 @@ func (s *Store) AddManualUser(username string, pubKeyLines string, signingKey in
 		})
 	}
 
-	// Sign with the operator's key if it matches a known identity.
-	// During bootstrap (no identities yet), skip signing.
-	if signingKey != nil {
-		if _, err := s.IdentifyKey(signingKey); err == nil {
-			data, err := signableBytesForIdentity(*id)
-			if err != nil {
-				return nil, fmt.Errorf("marshal for signing: %w", err)
-			}
-			sig, err := gitboxcrypto.SignBytes(data, signingKey)
-			if err != nil {
-				return nil, fmt.Errorf("sign identity: %w", err)
-			}
-			id.Sig = sig
-		}
-	}
-
 	path := filepath.Join(s.Root, "identities", username+".yaml")
+
+	// Write unsigned first so the key enters the store
 	if err := writeYAML(path, id); err != nil {
 		return nil, err
 	}
+
+	// Now sign: try operator's key first, fall back to self-signing during bootstrap
+	var signKey interface{}
+	if signingKey != nil {
+		if _, err := s.IdentifyKey(signingKey); err == nil {
+			signKey = signingKey
+		}
+	}
+	if signKey == nil {
+		// Bootstrap: self-sign (this identity's key is now in the store)
+		// The caller may have passed the new user's own private key as signingKey
+		if signingKey != nil {
+			if owner, err := s.IdentifyKey(signingKey); err == nil && owner == username {
+				signKey = signingKey
+			}
+		}
+	}
+	if signKey != nil {
+		data, err := signableBytesForIdentity(*id)
+		if err != nil {
+			return nil, fmt.Errorf("marshal for signing: %w", err)
+		}
+		sig, err := gitboxcrypto.SignBytes(data, signKey)
+		if err != nil {
+			return nil, fmt.Errorf("sign identity: %w", err)
+		}
+		id.Sig = sig
+		if err := writeYAML(path, id); err != nil {
+			return nil, err
+		}
+	}
+
 	return id, nil
 }
 
@@ -738,6 +769,19 @@ func (s *Store) AddKeyToUser(username string, pubKeyLines string, operatorKey in
 	}
 
 	id.FetchedAt = time.Now().UTC()
+
+	// Re-sign the modified identity
+	id.Sig = nil
+	if operatorKey != nil {
+		data, err := signableBytesForIdentity(*id)
+		if err == nil {
+			sig, err := gitboxcrypto.SignBytes(data, operatorKey)
+			if err == nil {
+				id.Sig = sig
+			}
+		}
+	}
+
 	path := filepath.Join(s.Root, "identities", username+".yaml")
 	if err := writeYAML(path, id); err != nil {
 		return nil, nil, err
@@ -773,7 +817,7 @@ func (s *Store) RefreshUserKeys(username string, privKey interface{}) (*Identity
 		newFingerprints[k.Fingerprint] = true
 	}
 
-	// Update identity
+	// Update identity, signed by the operator
 	id := &Identity{
 		GitHubUser: username,
 		FetchedAt:  time.Now().UTC(),
@@ -786,6 +830,18 @@ func (s *Store) RefreshUserKeys(username string, privKey interface{}) (*Identity
 			PublicKey:   k.RawLine,
 		})
 	}
+
+	// Sign with operator's key -- this proves a known identity vouched for the GitHub fetch
+	if privKey != nil {
+		data, err := signableBytesForIdentity(*id)
+		if err == nil {
+			sig, err := gitboxcrypto.SignBytes(data, privKey)
+			if err == nil {
+				id.Sig = sig
+			}
+		}
+	}
+
 	path := filepath.Join(s.Root, "identities", username+".yaml")
 	if err := writeYAML(path, id); err != nil {
 		return nil, nil, err
@@ -1358,30 +1414,40 @@ func (s *Store) verifyPaperKey(pk *PaperKeyConfig) error {
 	return nil
 }
 
-// verifyIdentity checks that an identity has a valid signature.
-// - GitHub-fetched identities (source: "github") are always trusted.
-// - Signed manual identities: signature is verified against known keys.
-// - Unsigned manual identities: accepted with a warning (TOFU model).
-//   Signing is recommended but not required for identities. The critical
-//   signing enforcement is on paper keys and groups, which are the real
-//   attack surface for unauthorized key injection.
+// verifyIdentity checks that an identity is trustworthy before using its keys
+// for wrapping DEKs. This is critical -- a tampered identity could inject an
+// attacker's public key, and the next rebox would wrap secrets for it.
+//
+// Trust rules:
+//   - Signed identity: signature must verify against a known key or paper key.
+//   - Unsigned identity: accepted ONLY if it's the sole identity (bootstrap).
+//     After bootstrap, all identities must be signed.
+//   - The "source" field is informational only -- it's not trusted for verification
+//     since an attacker could set it to anything.
+//
+// For the refresh-keys path, verification is skipped because the keys are
+// fetched directly from GitHub in the same operation (use verifyIdentitySkip).
 func (s *Store) verifyIdentity(id *Identity) error {
-	if id.Source == "github" {
+	if id.Sig != nil {
+		// Has a signature -- verify it
+		data, err := signableBytesForIdentity(*id)
+		if err != nil {
+			return err
+		}
+		trusted := s.collectTrustedKeys()
+		if err := gitboxcrypto.VerifySignature(data, id.Sig, trusted); err != nil {
+			return fmt.Errorf("identity %q: invalid signature: %w", id.GitHubUser, err)
+		}
 		return nil
 	}
-	if id.Sig == nil {
-		return nil // TOFU: accept unsigned identities (first writer wins)
+
+	// Unsigned: only accept during bootstrap (sole identity in the store)
+	users, _ := s.ListUsers()
+	if len(users) <= 1 {
+		return nil // Bootstrap: first identity, no one to sign it yet
 	}
-	// Has a signature -- verify it
-	data, err := signableBytesForIdentity(*id)
-	if err != nil {
-		return err
-	}
-	trusted := s.collectTrustedKeys()
-	if err := gitboxcrypto.VerifySignature(data, id.Sig, trusted); err != nil {
-		return fmt.Errorf("identity %q: invalid signature: %w", id.GitHubUser, err)
-	}
-	return nil
+
+	return fmt.Errorf("identity %q is unsigned (all identities must be signed after initial setup)", id.GitHubUser)
 }
 
 // verifyGroup checks that a group has a valid signature.
