@@ -204,20 +204,36 @@ Paper keys are:
 If you lose all your SSH keys, use your paper key to recover:
 
 ```bash
+# --- On Alice's new machine ---
+
 # Generate new SSH keys
 ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519
 
 # Recover your identity (signs the update with your paper key)
-gitbox recover-identity myusername ~/.ssh/id_ed25519.pub
+gitbox recover-identity alice ~/.ssh/id_ed25519.pub
 # Enter your 24 recovery words when prompted
 
-# Verify access
-gitbox decrypt my-secret
+# Commit and push the updated identity
+git add .gitbox/identities/alice.yaml
+git commit -m "recover alice identity after key loss"
+git push
 
-# Commit the updated identity
-git add .gitbox/identities/
-git commit -m "recover identity after key loss"
+# --- On Bob's machine (Bob is another recipient) ---
+
+git pull
+gitbox rebox alice     # re-wraps DEKs for Alice's new keys
+
+git add .gitbox/secrets/
+git commit -m "rebox secrets for alice new keys"
+git push
+
+# --- Back on Alice's machine ---
+
+git pull
+gitbox decrypt my-secret   # works with new key
 ```
+
+**Why two steps?** Alice's identity update gives her new public keys, but existing secrets still have DEKs wrapped for the old keys. Someone who can decrypt those secrets (Bob) needs to re-wrap the DEKs for Alice's new keys. This is `rebox` -- it's a separate step because it requires a private key from another recipient.
 
 The paper key acts as a signing authority: it can authorize changes to your own identity, sign group modifications, and sign new paper keys. This is what makes it safe to write down and store offline -- it's the break-glass root of trust for your gitbox identity.
 
@@ -286,6 +302,7 @@ Paper Keys & Recovery:
   paper-key delete <name>                 Remove a paper key
   paper-key recover <secret>              Decrypt using paper key words
   recover-identity <user> <key.pub>       Re-key identity using paper key
+  rebox <user>                            Re-wrap secrets for user's current keys
 
 Config:
   init                                    Initialize .gitbox

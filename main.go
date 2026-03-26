@@ -53,6 +53,8 @@ func main() {
 		err = cmdPaperKey(args)
 	case "recover-identity":
 		err = cmdRecoverIdentity(args)
+	case "rebox":
+		err = cmdRebox(args)
 	case "install-hook":
 		err = cmdInstallHook(args)
 	case "help", "--help", "-h":
@@ -108,6 +110,7 @@ Config Commands:
   paper-key recover <secret>    Decrypt using paper key
   recover-identity <user> <key.pub>
                                Update SSH keys using paper key (identity recovery)
+  rebox <user>                 Re-wrap secrets for user's current keys
   install-hook                 Install git pre-commit hook
 
 Other:
@@ -713,6 +716,50 @@ func cmdRecoverIdentity(args []string) error {
 	fmt.Println("  1. Run 'gitbox decrypt <secret>' to verify access")
 	fmt.Println("  2. Commit the updated .gitbox/identities/ file")
 	fmt.Println("  3. Consider generating a new paper key: gitbox paper-key generate -n <name>")
+	return nil
+}
+
+func cmdRebox(args []string) error {
+	if len(args) < 1 {
+		return fmt.Errorf("usage: gitbox rebox <username> [-k <key-path>]")
+	}
+
+	username := args[0]
+	var keyPath string
+	for i := 1; i < len(args); i++ {
+		if (args[i] == "-k" || args[i] == "--key") && i+1 < len(args) {
+			keyPath = args[i+1]
+			i++
+		}
+	}
+
+	s, _, err := openStore()
+	if err != nil {
+		return err
+	}
+
+	privKey, err := loadPrivateKey(keyPath)
+	if err != nil {
+		return err
+	}
+
+	// Verify the target user exists
+	id, err := s.GetUser(username)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("Reboxing secrets for %s (%d keys)...\n", username, len(id.Keys))
+	reboxed, err := s.ReboxUser(username, privKey)
+	if err != nil {
+		return err
+	}
+
+	if reboxed == 0 {
+		fmt.Println("  No secrets to rebox.")
+	} else {
+		fmt.Printf("  Reboxed %d secret(s) for %s's current keys.\n", reboxed, username)
+	}
 	return nil
 }
 

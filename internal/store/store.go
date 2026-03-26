@@ -793,10 +793,25 @@ func (s *Store) RefreshUserKeys(username string, privKey interface{}) (*Identity
 		}
 	}
 
-	// Find all secrets this user has access to and re-wrap
+	reboxed, err := s.ReboxUser(username, privKey)
+	if err != nil {
+		return id, 0, err
+	}
+	return id, reboxed, nil
+}
+
+// ReboxUser re-wraps the DEK for all secrets a user has access to,
+// using the user's current keys from their identity file.
+// Requires privKey from another recipient who can decrypt the DEKs.
+//
+// This is the key operation after any identity change:
+//   - After recover-identity (user got new SSH keys via paper key)
+//   - After refresh-keys (GitHub keys changed)
+//   - After add-key (new key added to existing user)
+func (s *Store) ReboxUser(username string, privKey interface{}) (int, error) {
 	secrets, err := s.ListSecrets()
 	if err != nil {
-		return id, 0, nil
+		return 0, nil
 	}
 
 	reboxed := 0
@@ -818,10 +833,10 @@ func (s *Store) RefreshUserKeys(username string, privKey interface{}) (*Identity
 			continue
 		}
 
-		// Decrypt the DEK
+		// Decrypt the DEK using the operator's key
 		dek, err := s.decryptDEK(manifest, privKey)
 		if err != nil {
-			continue // Can't decrypt this one, skip
+			continue
 		}
 
 		// Remove old entries for this user
@@ -832,7 +847,7 @@ func (s *Store) RefreshUserKeys(username string, privKey interface{}) (*Identity
 			}
 		}
 
-		// Re-wrap for the user with new keys
+		// Re-wrap for the user with their current keys
 		newEntries, err := s.wrapDEKForUser(dek, username)
 		if err != nil {
 			continue
@@ -848,7 +863,7 @@ func (s *Store) RefreshUserKeys(username string, privKey interface{}) (*Identity
 		reboxed++
 	}
 
-	return id, reboxed, nil
+	return reboxed, nil
 }
 
 // -- Groups --
