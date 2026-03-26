@@ -11,9 +11,8 @@ import (
 
 // Signature holds a detached SSH signature over some content.
 type Signature struct {
-	SignedBy  string `yaml:"signed_by"`  // username of signer
-	Format   string `yaml:"format"`     // signature algorithm (e.g. "ssh-ed25519")
-	Blob     string `yaml:"blob"`       // base64-encoded signature blob
+	Format string `yaml:"format"` // signature algorithm (e.g. "ssh-ed25519")
+	Blob   string `yaml:"blob"`   // base64-encoded signature blob
 }
 
 // SignBytes signs data with an SSH private key.
