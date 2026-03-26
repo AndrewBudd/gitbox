@@ -199,41 +199,47 @@ Paper keys are:
 - **Removed when you're revoked** -- revoking a user also strips their paper keys from secrets
 - **Encoded as 24 BIP39 mnemonic words** with a SHA-256 checksum (also accepts hex)
 
-### Identity Recovery
+### Identity Recovery (Lost SSH Keys)
 
-If you lose all your SSH keys, use your paper key to recover:
+If you lose all your SSH keys, your paper key handles everything -- identity update AND reboxing:
 
 ```bash
-# --- On Alice's new machine ---
-
-# Generate new SSH keys
+# Generate new SSH keys on your new machine
 ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519
 
-# Recover your identity (signs the update with your paper key)
+# Recover: updates identity + reboxes all secrets in one step
 gitbox recover-identity alice ~/.ssh/id_ed25519.pub
 # Enter your 24 recovery words when prompted
+# Output:
+#   Identity "alice" updated with new keys, signed by paper key.
+#   Reboxed 5 secret(s) for alice's current keys.
 
-# Commit and push the updated identity
-git add .gitbox/identities/alice.yaml
+# Commit everything
+git add .gitbox/
 git commit -m "recover alice identity after key loss"
-git push
-
-# --- On Bob's machine (Bob is another recipient) ---
-
-git pull
-gitbox rebox alice     # re-wraps DEKs for Alice's new keys
-
-git add .gitbox/secrets/
-git commit -m "rebox secrets for alice new keys"
-git push
-
-# --- Back on Alice's machine ---
-
-git pull
-gitbox decrypt my-secret   # works with new key
 ```
 
-**Why two steps?** Alice's identity update gives her new public keys, but existing secrets still have DEKs wrapped for the old keys. Someone who can decrypt those secrets (Bob) needs to re-wrap the DEKs for Alice's new keys. This is `rebox` -- it's a separate step because it requires a private key from another recipient.
+The paper key can decrypt the DEKs (it's a recipient on every secret), so it handles the reboxing automatically. No second person needed.
+
+### Key Refresh (GitHub Keys Changed)
+
+If someone rotates their GitHub SSH keys, any team member can refresh and rebox:
+
+```bash
+# Fetches new keys from GitHub, then reboxes all their secrets
+gitbox refresh-keys alice
+
+# Output:
+#   Updated to 2 key(s)
+#   Reboxed 5 secret(s) for alice's current keys.
+#   Warning: could not rebox 1 secret(s) (no access to decrypt):
+#     - infra-creds
+#   Another recipient with access to those secrets will need to run refresh-keys.
+```
+
+If the operator doesn't have access to all of alice's secrets, it tells you which ones still need reboxing. Another team member who does have access runs the same command to pick up the rest.
+
+The same auto-rebox happens when you `add-key` to an existing user.
 
 The paper key acts as a signing authority: it can authorize changes to your own identity, sign group modifications, and sign new paper keys. This is what makes it safe to write down and store offline -- it's the break-glass root of trust for your gitbox identity.
 
@@ -301,8 +307,7 @@ Paper Keys & Recovery:
   paper-key list                          List all paper keys and owners
   paper-key delete <name>                 Remove a paper key
   paper-key recover <secret>              Decrypt using paper key words
-  recover-identity <user> <key.pub>       Re-key identity using paper key
-  rebox <user>                            Re-wrap secrets for user's current keys
+  recover-identity <user> <key.pub>       Re-key identity + rebox using paper key
 
 Config:
   init                                    Initialize .gitbox

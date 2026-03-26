@@ -53,8 +53,6 @@ func main() {
 		err = cmdPaperKey(args)
 	case "recover-identity":
 		err = cmdRecoverIdentity(args)
-	case "rebox":
-		err = cmdRebox(args)
 	case "install-hook":
 		err = cmdInstallHook(args)
 	case "help", "--help", "-h":
@@ -109,8 +107,7 @@ Config Commands:
   paper-key delete <name>       Remove a paper key
   paper-key recover <secret>    Decrypt using paper key
   recover-identity <user> <key.pub>
-                               Update SSH keys using paper key (identity recovery)
-  rebox <user>                 Re-wrap secrets for user's current keys
+                               Recover identity + rebox secrets using paper key
   install-hook                 Install git pre-commit hook
 
 Other:
@@ -705,62 +702,34 @@ func cmdRecoverIdentity(args []string) error {
 		}
 	}
 
-	if err := s.RecoverIdentity(username, string(pubKeyData), pk); err != nil {
+	result, err := s.RecoverIdentity(username, string(pubKeyData), pk)
+	if err != nil {
 		return err
 	}
 
 	fmt.Printf("Identity %q updated with new keys, signed by paper key.\n", username)
-	fmt.Println("You can now use your new SSH key for all gitbox operations.")
+	printReboxResult(username, result)
 	fmt.Println()
 	fmt.Println("Next steps:")
-	fmt.Println("  1. Run 'gitbox decrypt <secret>' to verify access")
-	fmt.Println("  2. Commit the updated .gitbox/identities/ file")
-	fmt.Println("  3. Consider generating a new paper key: gitbox paper-key generate -n <name>")
+	fmt.Println("  1. Commit the updated .gitbox/ directory")
+	fmt.Println("  2. Consider generating a new paper key: gitbox paper-key generate -n <name>")
 	return nil
 }
 
-func cmdRebox(args []string) error {
-	if len(args) < 1 {
-		return fmt.Errorf("usage: gitbox rebox <username> [-k <key-path>]")
+func printReboxResult(username string, result *store.ReboxResult) {
+	if result == nil {
+		return
 	}
-
-	username := args[0]
-	var keyPath string
-	for i := 1; i < len(args); i++ {
-		if (args[i] == "-k" || args[i] == "--key") && i+1 < len(args) {
-			keyPath = args[i+1]
-			i++
+	if result.Reboxed > 0 {
+		fmt.Printf("  Reboxed %d secret(s) for %s's current keys.\n", result.Reboxed, username)
+	}
+	if len(result.Skipped) > 0 {
+		fmt.Printf("  Warning: could not rebox %d secret(s) (no access to decrypt):\n", len(result.Skipped))
+		for _, name := range result.Skipped {
+			fmt.Printf("    - %s\n", name)
 		}
+		fmt.Println("  Another recipient with access to those secrets will need to run refresh-keys.")
 	}
-
-	s, _, err := openStore()
-	if err != nil {
-		return err
-	}
-
-	privKey, err := loadPrivateKey(keyPath)
-	if err != nil {
-		return err
-	}
-
-	// Verify the target user exists
-	id, err := s.GetUser(username)
-	if err != nil {
-		return err
-	}
-
-	fmt.Printf("Reboxing secrets for %s (%d keys)...\n", username, len(id.Keys))
-	reboxed, err := s.ReboxUser(username, privKey)
-	if err != nil {
-		return err
-	}
-
-	if reboxed == 0 {
-		fmt.Println("  No secrets to rebox.")
-	} else {
-		fmt.Printf("  Reboxed %d secret(s) for %s's current keys.\n", reboxed, username)
-	}
-	return nil
 }
 
 func cmdAddKey(args []string) error {
@@ -824,7 +793,7 @@ func cmdAddKey(args []string) error {
 			fmt.Printf("  %s %s\n", k.Type, k.Fingerprint)
 		}
 	} else {
-		added, err := s.AddKeyToUser(username, pubKeyData)
+		added, result, err := s.AddKeyToUser(username, pubKeyData, signingKey)
 		if err != nil {
 			return err
 		}
@@ -832,6 +801,7 @@ func cmdAddKey(args []string) error {
 		for _, k := range added {
 			fmt.Printf("  %s %s\n", k.Type, k.Fingerprint)
 		}
+		printReboxResult(username, result)
 	}
 	return nil
 }
@@ -878,13 +848,14 @@ func cmdRefreshKeys(args []string) error {
 	}
 
 	for _, username := range targets {
-		fmt.Printf("Refreshing keys for %s...\n", username)
-		id, reboxed, err := s.RefreshUserKeys(username, privKey)
+		fmt.Printf("Refreshing keys for %s from %s...\n", username, s.GitHost())
+		id, result, err := s.RefreshUserKeys(username, privKey)
 		if err != nil {
 			fmt.Printf("  Error: %v\n", err)
 			continue
 		}
-		fmt.Printf("  Updated to %d key(s), reboxed %d secret(s)\n", len(id.Keys), reboxed)
+		fmt.Printf("  Updated to %d key(s)\n", len(id.Keys))
+		printReboxResult(username, result)
 	}
 	return nil
 }

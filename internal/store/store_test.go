@@ -452,7 +452,7 @@ func TestAddKeyToUser(t *testing.T) {
 	sshPub, _ := ssh.NewPublicKey(&rsaKey.PublicKey)
 	authKey := string(ssh.MarshalAuthorizedKey(sshPub))
 
-	added, err := s.AddKeyToUser("alice", authKey)
+	added, _, err := s.AddKeyToUser("alice", authKey, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -467,7 +467,7 @@ func TestAddKeyToUser(t *testing.T) {
 	}
 
 	// Adding same key again should fail
-	_, err = s.AddKeyToUser("alice", authKey)
+	_, _, err = s.AddKeyToUser("alice", authKey, nil)
 	if err == nil {
 		t.Fatal("should fail on duplicate key")
 	}
@@ -755,9 +755,12 @@ func TestRecoverIdentity(t *testing.T) {
 	newPubLine := string(ssh.MarshalAuthorizedKey(sshNewPub))
 
 	// Alice recovers her identity using paper key
-	err = s.RecoverIdentity("alice", newPubLine, paperKey)
+	result, err := s.RecoverIdentity("alice", newPubLine, paperKey)
 	if err != nil {
 		t.Fatal("recover identity:", err)
+	}
+	if result.Reboxed == 0 {
+		t.Fatal("expected rebox to happen during recovery")
 	}
 
 	// Verify the identity was updated
@@ -807,7 +810,7 @@ func TestRecoverIdentityWrongPaperKey(t *testing.T) {
 	sshPub, _ := ssh.NewPublicKey(newPub)
 	pubLine := string(ssh.MarshalAuthorizedKey(sshPub))
 
-	err := s.RecoverIdentity("alice", pubLine, wrongPK)
+	_, err := s.RecoverIdentity("alice", pubLine, wrongPK)
 	if err == nil {
 		t.Fatal("should reject recovery with unregistered paper key")
 	}

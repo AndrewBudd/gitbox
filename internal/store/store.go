@@ -471,11 +471,13 @@ func (s *Store) SavePaperKey(name string, pk *gitboxcrypto.PaperKey, signingKey 
 // RecoverIdentity updates a user's SSH keys, signed by a paper key.
 // This is the primary recovery flow: user lost SSH keys, has paper key words,
 // generates new SSH keys, uses paper key to authorize the identity update.
-func (s *Store) RecoverIdentity(username string, newPubKeyLines string, paperKey *gitboxcrypto.PaperKey) error {
+// RecoverIdentity updates a user's SSH keys signed by their paper key,
+// then automatically reboxes all secrets using the paper key to decrypt DEKs.
+func (s *Store) RecoverIdentity(username string, newPubKeyLines string, paperKey *gitboxcrypto.PaperKey) (*ReboxResult, error) {
 	// Verify this paper key is registered and belongs to this user
 	paperKeys, err := s.ListPaperKeys()
 	if err != nil {
-		return fmt.Errorf("list paper keys: %w", err)
+		return nil, fmt.Errorf("list paper keys: %w", err)
 	}
 	found := false
 	for _, pk := range paperKeys {
@@ -485,19 +487,17 @@ func (s *Store) RecoverIdentity(username string, newPubKeyLines string, paperKey
 		}
 	}
 	if !found {
-		return fmt.Errorf("paper key does not match any registered paper key for user %q", username)
+		return nil, fmt.Errorf("paper key does not match any registered paper key for user %q", username)
 	}
 
-	// Parse the new public keys
 	keys, err := gitboxcrypto.ParseSSHPublicKeys(newPubKeyLines)
 	if err != nil {
-		return fmt.Errorf("parse new keys: %w", err)
+		return nil, fmt.Errorf("parse new keys: %w", err)
 	}
 	if len(keys) == 0 {
-		return fmt.Errorf("no supported keys found")
+		return nil, fmt.Errorf("no supported keys found")
 	}
 
-	// Build updated identity
 	id := &Identity{
 		GitHubUser: username,
 		FetchedAt:  time.Now().UTC(),
@@ -511,22 +511,29 @@ func (s *Store) RecoverIdentity(username string, newPubKeyLines string, paperKey
 		})
 	}
 
-	// Sign with the paper key (paper keys are trusted signers)
+	// Sign with the paper key
 	data, err := signableBytesForIdentity(*id)
 	if err != nil {
-		return fmt.Errorf("marshal for signing: %w", err)
+		return nil, fmt.Errorf("marshal for signing: %w", err)
 	}
 	sig, err := gitboxcrypto.SignBytes(data, paperKey.PrivateKey)
 	if err != nil {
-		return fmt.Errorf("sign identity with paper key: %w", err)
+		return nil, fmt.Errorf("sign identity with paper key: %w", err)
 	}
 	id.Sig = sig
 
 	path := filepath.Join(s.Root, "identities", username+".yaml")
 	if err := writeYAML(path, id); err != nil {
-		return err
+		return nil, err
 	}
-	return nil
+
+	// Auto-rebox: paper key is a recipient, so use it to decrypt DEKs
+	// and re-wrap for the user's new keys
+	result, err := s.ReboxUser(username, paperKey.PrivateKey)
+	if err != nil {
+		return nil, fmt.Errorf("rebox after recovery: %w", err)
+	}
+	return result, nil
 }
 
 // IdentifyKey determines which user a private key belongs to
@@ -691,22 +698,22 @@ func (s *Store) AddManualUser(username string, pubKeyLines string, signingKey in
 	return id, nil
 }
 
-// AddKeyToUser appends additional SSH public keys to an existing identity.
-func (s *Store) AddKeyToUser(username string, pubKeyLines string) ([]StoredKey, error) {
+// AddKeyToUser appends additional SSH public keys to an existing identity,
+// then reboxes all secrets the user has access to.
+func (s *Store) AddKeyToUser(username string, pubKeyLines string, operatorKey interface{}) ([]StoredKey, *ReboxResult, error) {
 	id, err := s.GetUser(username)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	keys, err := gitboxcrypto.ParseSSHPublicKeys(pubKeyLines)
 	if err != nil {
-		return nil, fmt.Errorf("parse keys: %w", err)
+		return nil, nil, fmt.Errorf("parse keys: %w", err)
 	}
 	if len(keys) == 0 {
-		return nil, fmt.Errorf("no supported keys found")
+		return nil, nil, fmt.Errorf("no supported keys found")
 	}
 
-	// Deduplicate by fingerprint
 	existing := make(map[string]bool)
 	for _, k := range id.Keys {
 		existing[k.Fingerprint] = true
@@ -727,31 +734,37 @@ func (s *Store) AddKeyToUser(username string, pubKeyLines string) ([]StoredKey, 
 	}
 
 	if len(added) == 0 {
-		return nil, fmt.Errorf("all keys already registered for user %q", username)
+		return nil, nil, fmt.Errorf("all keys already registered for user %q", username)
 	}
 
 	id.FetchedAt = time.Now().UTC()
 	path := filepath.Join(s.Root, "identities", username+".yaml")
 	if err := writeYAML(path, id); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return added, nil
+
+	// Auto-rebox secrets for the updated key set
+	var result *ReboxResult
+	if operatorKey != nil {
+		result, _ = s.ReboxUser(username, operatorKey)
+	}
+	return added, result, nil
 }
 
 // RefreshUserKeys re-fetches a user's keys from GitHub and re-wraps DEKs
 // for all secrets the user has access to.
-func (s *Store) RefreshUserKeys(username string, privKey interface{}) (*Identity, int, error) {
+func (s *Store) RefreshUserKeys(username string, privKey interface{}) (*Identity, *ReboxResult, error) {
 	rawKeys, err := github.FetchUserKeys(s.GitHost(), username)
 	if err != nil {
-		return nil, 0, err
+		return nil, nil, err
 	}
 
 	keys, err := gitboxcrypto.ParseSSHPublicKeys(rawKeys)
 	if err != nil {
-		return nil, 0, fmt.Errorf("parse keys: %w", err)
+		return nil, nil, fmt.Errorf("parse keys: %w", err)
 	}
 	if len(keys) == 0 {
-		return nil, 0, fmt.Errorf("no supported keys found for user %q", username)
+		return nil, nil, fmt.Errorf("no supported keys found for user %q", username)
 	}
 
 	// Build new key fingerprint set to detect removed keys
@@ -775,7 +788,7 @@ func (s *Store) RefreshUserKeys(username string, privKey interface{}) (*Identity
 	}
 	path := filepath.Join(s.Root, "identities", username+".yaml")
 	if err := writeYAML(path, id); err != nil {
-		return nil, 0, err
+		return nil, nil, err
 	}
 
 	// Prune paper keys owned by this user that were signed by now-removed keys.
@@ -793,35 +806,35 @@ func (s *Store) RefreshUserKeys(username string, privKey interface{}) (*Identity
 		}
 	}
 
-	reboxed, err := s.ReboxUser(username, privKey)
+	result, err := s.ReboxUser(username, privKey)
 	if err != nil {
-		return id, 0, err
+		return id, nil, err
 	}
-	return id, reboxed, nil
+	return id, result, nil
+}
+
+// ReboxResult summarizes a rebox operation.
+type ReboxResult struct {
+	Reboxed int
+	Skipped []string // secrets the operator couldn't decrypt
 }
 
 // ReboxUser re-wraps the DEK for all secrets a user has access to,
 // using the user's current keys from their identity file.
-// Requires privKey from another recipient who can decrypt the DEKs.
-//
-// This is the key operation after any identity change:
-//   - After recover-identity (user got new SSH keys via paper key)
-//   - After refresh-keys (GitHub keys changed)
-//   - After add-key (new key added to existing user)
-func (s *Store) ReboxUser(username string, privKey interface{}) (int, error) {
+// privKey is from the operator (whoever is running the command).
+func (s *Store) ReboxUser(username string, privKey interface{}) (*ReboxResult, error) {
 	secrets, err := s.ListSecrets()
 	if err != nil {
-		return 0, nil
+		return &ReboxResult{}, nil
 	}
 
-	reboxed := 0
+	result := &ReboxResult{}
 	for _, secretName := range secrets {
 		manifest, err := s.GetSecret(secretName)
 		if err != nil {
 			continue
 		}
 
-		// Check if this user is a recipient
 		hasAccess := false
 		for _, re := range manifest.Recipients {
 			if re.GitHubUser == username {
@@ -833,13 +846,12 @@ func (s *Store) ReboxUser(username string, privKey interface{}) (int, error) {
 			continue
 		}
 
-		// Decrypt the DEK using the operator's key
 		dek, err := s.decryptDEK(manifest, privKey)
 		if err != nil {
+			result.Skipped = append(result.Skipped, secretName)
 			continue
 		}
 
-		// Remove old entries for this user
 		var remaining []RecipientEntry
 		for _, re := range manifest.Recipients {
 			if re.GitHubUser != username {
@@ -847,9 +859,9 @@ func (s *Store) ReboxUser(username string, privKey interface{}) (int, error) {
 			}
 		}
 
-		// Re-wrap for the user with their current keys
 		newEntries, err := s.wrapDEKForUser(dek, username)
 		if err != nil {
+			result.Skipped = append(result.Skipped, secretName)
 			continue
 		}
 
@@ -858,12 +870,13 @@ func (s *Store) ReboxUser(username string, privKey interface{}) (int, error) {
 
 		secretPath := filepath.Join(s.Root, "secrets", secretName+".yaml")
 		if err := writeYAML(secretPath, manifest); err != nil {
+			result.Skipped = append(result.Skipped, secretName)
 			continue
 		}
-		reboxed++
+		result.Reboxed++
 	}
 
-	return reboxed, nil
+	return result, nil
 }
 
 // -- Groups --
