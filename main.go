@@ -29,6 +29,8 @@ func main() {
 		err = cmdAddUser(args)
 	case "add-key":
 		err = cmdAddKey(args)
+	case "remove-user":
+		err = cmdRemoveUser(args)
 	case "refresh-keys":
 		err = cmdRefreshKeys(args)
 	case "group":
@@ -79,6 +81,7 @@ Usage: gitbox <command> [arguments]
 Identity Commands:
   add-user <username>          Fetch and store a GitHub user's SSH keys
   add-key <username> <key>     Add an SSH key manually (file path or inline)
+  remove-user <username>       Revoke all access, archive identity
   refresh-keys <user> [-k key] Re-fetch keys from GitHub and rebox all secrets
   list-users                   List all known identities
 
@@ -245,6 +248,57 @@ func cmdAddUser(args []string) error {
 	for _, k := range id.Keys {
 		fmt.Printf("  %s %s\n", k.Type, k.Fingerprint)
 	}
+	return nil
+}
+
+func cmdRemoveUser(args []string) error {
+	if len(args) < 1 {
+		return fmt.Errorf("usage: gitbox remove-user <username>")
+	}
+
+	username := args[0]
+	var keyPath string
+	for i := 1; i < len(args); i++ {
+		if (args[i] == "-k" || args[i] == "--key") && i+1 < len(args) {
+			keyPath = args[i+1]
+			i++
+		}
+	}
+
+	s, _, err := openStore()
+	if err != nil {
+		return err
+	}
+
+	privKey, err := loadPrivateKey(keyPath)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("Removing user %s...\n", username)
+	result, err := s.RemoveUser(username, privKey, privKey)
+	if err != nil {
+		return err
+	}
+
+	if result.RevokedSecrets > 0 {
+		fmt.Printf("  Revoked from %d secret(s) (re-encrypted with new keys)\n", result.RevokedSecrets)
+	}
+	if len(result.SkippedSecrets) > 0 {
+		fmt.Printf("  Warning: could not revoke from %d secret(s) (no access to decrypt):\n", len(result.SkippedSecrets))
+		for _, name := range result.SkippedSecrets {
+			fmt.Printf("    - %s\n", name)
+		}
+		fmt.Println("  Another recipient with access to those secrets should run remove-user.")
+	}
+	if result.RemovedPaperKeys > 0 {
+		fmt.Printf("  Removed %d paper key(s)\n", result.RemovedPaperKeys)
+	}
+	if result.RemovedFromGroups > 0 {
+		fmt.Printf("  Removed from %d group(s)\n", result.RemovedFromGroups)
+	}
+	fmt.Printf("  Identity archived to .gitbox/identities/.removed/%s.yaml\n", username)
+	fmt.Println("  To re-add this user later: gitbox add-user", username)
 	return nil
 }
 

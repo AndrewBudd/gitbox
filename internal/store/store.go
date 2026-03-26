@@ -243,6 +243,89 @@ func (s *Store) GetUser(username string) (*Identity, error) {
 	return &id, nil
 }
 
+// RemoveUser fully revokes a user: strips them from all secrets, removes their
+// paper keys, removes them from groups, and archives their identity.
+// The identity file is moved to .removed/ (not deleted) so the trust chain
+// stays intact and the user can be re-added later.
+func (s *Store) RemoveUser(username string, privKey interface{}, signingKey interface{}) (*RemoveUserResult, error) {
+	if _, err := s.GetUser(username); err != nil {
+		return nil, fmt.Errorf("user %q not found", username)
+	}
+
+	// Check they're not the trust anchor (can't remove the root)
+	if ta, err := s.GetTrustAnchor(); err == nil && ta.RootUser == username {
+		return nil, fmt.Errorf("cannot remove %q: they are the trust anchor root (re-root first)", username)
+	}
+
+	result := &RemoveUserResult{}
+
+	// 1. Revoke from all secrets
+	secrets, _ := s.ListSecrets()
+	for _, secretName := range secrets {
+		recipients, _ := s.RecipientsForSecret(secretName)
+		for _, r := range recipients {
+			if r == username || isPaperKeyOwnedBy(r, username) {
+				err := s.RevokeAccess(secretName, username, privKey)
+				if err != nil {
+					result.SkippedSecrets = append(result.SkippedSecrets, secretName)
+				} else {
+					result.RevokedSecrets++
+				}
+				break
+			}
+		}
+	}
+
+	// 2. Remove their paper keys
+	paperKeys, _ := s.ListPaperKeys()
+	for _, pk := range paperKeys {
+		if pk.Owner == username {
+			s.DeletePaperKey(pk.Name)
+			result.RemovedPaperKeys++
+		}
+	}
+
+	// 3. Remove from groups
+	groups, err := s.LoadGroups()
+	if err == nil {
+		changed := false
+		for name, members := range groups {
+			var filtered []string
+			for _, m := range members {
+				if m != username {
+					filtered = append(filtered, m)
+				} else {
+					changed = true
+					result.RemovedFromGroups++
+				}
+			}
+			groups[name] = filtered
+		}
+		if changed {
+			s.SaveGroups(groups, signingKey)
+		}
+	}
+
+	// 4. Archive identity (move to .removed/)
+	removedDir := filepath.Join(s.Root, "identities", ".removed")
+	os.MkdirAll(removedDir, 0755)
+	src := filepath.Join(s.Root, "identities", username+".yaml")
+	dst := filepath.Join(removedDir, username+".yaml")
+	if err := os.Rename(src, dst); err != nil {
+		return result, fmt.Errorf("archive identity: %w", err)
+	}
+
+	return result, nil
+}
+
+// RemoveUserResult summarizes what happened during user removal.
+type RemoveUserResult struct {
+	RevokedSecrets   int
+	SkippedSecrets   []string // secrets the operator couldn't decrypt
+	RemovedPaperKeys int
+	RemovedFromGroups int
+}
+
 // ListUsers returns all stored identities.
 func (s *Store) ListUsers() ([]string, error) {
 	entries, err := os.ReadDir(filepath.Join(s.Root, "identities"))
