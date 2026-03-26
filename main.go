@@ -276,6 +276,16 @@ func cmdEncrypt(args []string) error {
 			}
 		case "--no-self":
 			noSelf = true
+		default:
+			if strings.HasPrefix(args[i], "-") {
+				return fmt.Errorf("unknown flag: %s", args[i])
+			}
+			// Treat bare args as additional recipients
+			if recipientStr == "" {
+				recipientStr = args[i]
+			} else {
+				recipientStr += "," + args[i]
+			}
 		}
 	}
 
@@ -335,7 +345,8 @@ func cmdEncrypt(args []string) error {
 	}
 	_ = hook.TrackFile(root, relPath)
 	_ = hook.EnsureGitignore(root, relPath)
-	fmt.Printf("Encrypted %q as secret %q for %d recipient(s)\n", filePath, name, len(recipients))
+	fmt.Printf("Encrypted %q as secret %q\n", filePath, name)
+	fmt.Printf("  Recipients: %s\n", strings.Join(recipients, ", "))
 	fmt.Printf("  Stored: .gitbox/secrets/%s.yaml\n", name)
 	fmt.Printf("  Added %s to .gitignore\n", relPath)
 	return nil
